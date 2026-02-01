@@ -1,0 +1,11 @@
+/target
+/generated
+*.lock
+!motto.lock
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml

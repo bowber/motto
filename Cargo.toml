@@ -1,0 +1,78 @@
+[package]
+name = "motto"
+version = "0.1.0"
+edition = "2024"
+authors = ["Motto Team"]
+description = "Compiler-as-a-Service: Turn Rust schema.rs into multi-platform SDK toolkits"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mottomesh/motto"
+keywords = ["codegen", "sdk", "wasm", "serialization", "bitcode"]
+categories = ["development-tools", "compilers"]
+
+[lib]
+name = "motto"
+path = "src/lib.rs"
+
+[[bin]]
+name = "motto-cli"
+path = "src/bin/cli.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Static Analysis (Syn-based Rust AST parsing)
+syn = { version = "2", features = ["full", "parsing", "visit", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+
+# Serialization & IR
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bson = "2"
+
+# Hashing for Schema Fingerprint
+sha2 = "0.10"
+hex = "0.4"
+
+# Compression
+zstd = "0.13"
+
+# Bitcode serialization
+bitcode = "0.6"
+
+# Async runtime for WebTransport
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Template engine for code generation
+tera = "1"
+heck = "0.5" # Case conversion utilities
+
+# File watching (for dev mode)
+notify = "7"
+
+# TOML parsing for motto.lock
+toml = "0.8"
+
+# Date/time for timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+pretty_assertions = "1"
+
+[features]
+default = ["all-emitters"]
+all-emitters = ["emitter-typescript", "emitter-swift", "emitter-kotlin", "emitter-unity"]
+emitter-typescript = []
+emitter-swift = []
+emitter-kotlin = []
+emitter-unity = []
