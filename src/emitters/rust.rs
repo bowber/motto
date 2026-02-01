@@ -43,6 +43,9 @@ impl Emitter for RustEmitter {
         // Generate Cargo.toml
         files.push(generate_cargo_toml(&config.manifest)?);
 
+        // Generate tests
+        files.push(generate_tests(&config.manifest)?);
+
         Ok(files)
     }
 }
@@ -82,6 +85,9 @@ fn generate_lib(manifest: &SchemaManifest) -> Result<GeneratedFile> {
 #![allow(clippy::derive_partial_eq_without_eq)]
 
 pub mod codec;
+
+#[cfg(test)]
+mod tests;
 
 /// Protocol version byte - embedded in all packets
 pub const PROTOCOL_VERSION_BYTE: u8 = "#,
@@ -899,4 +905,521 @@ fn rust_type_to_rust(type_ref: &str) -> String {
     } else {
         type_ref.to_string()
     }
+}
+
+/// Generate test file for the SDK
+fn generate_tests(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+    let mut content = String::new();
+
+    content.push_str(&generate_rust_header(
+        manifest.meta.version_byte,
+        &manifest.meta.fingerprint,
+        &manifest.meta.generated_at,
+    ));
+
+    content.push_str(
+        r#"
+//! Generated tests for encode/decode roundtrips and router functionality.
+//!
+//! Run with: `cargo test`
+
+use super::*;
+use super::codec::{Encode, Decode};
+
+// ============================================================================
+// Helper: Create test instances with sample data
+// ============================================================================
+
+"#,
+    );
+
+    // Generate helper functions to create test instances for each non-generic struct
+    for msg in &manifest.messages {
+        if !msg.generics.is_empty() {
+            continue; // Skip generic types
+        }
+        content.push_str(&generate_test_instance_fn(msg, manifest));
+    }
+
+    // Generate roundtrip tests for each struct
+    content.push_str(
+        r#"
+// ============================================================================
+// Roundtrip Tests: Encode -> Decode -> Compare
+// ============================================================================
+
+"#,
+    );
+
+    for msg in &manifest.messages {
+        if !msg.generics.is_empty() {
+            continue;
+        }
+        content.push_str(&generate_roundtrip_test(msg));
+    }
+
+    // Generate enum tests
+    content.push_str(
+        r#"
+// ============================================================================
+// Enum Serialization Tests
+// ============================================================================
+
+"#,
+    );
+
+    for e in &manifest.enums {
+        if !e.generics.is_empty() {
+            continue;
+        }
+        content.push_str(&generate_enum_tests(e));
+    }
+
+    // Generate router tests if router exists
+    if let Some(router) = &manifest.router {
+        content.push_str(
+            r#"
+// ============================================================================
+// Router Tests: Tag values, routing, handler trait
+// ============================================================================
+
+"#,
+        );
+        content.push_str(&generate_router_tests(router, manifest));
+    }
+
+    // Generate version byte tests
+    content.push_str(&generate_version_tests(manifest));
+
+    Ok(GeneratedFile {
+        path: PathBuf::from("src/tests.rs"),
+        content,
+    })
+}
+
+/// Generate a function that creates a test instance of a struct
+fn generate_test_instance_fn(msg: &MessageDef, manifest: &SchemaManifest) -> String {
+    let mut s = String::new();
+    let fn_name = utils::to_snake_case(&msg.name);
+
+    s.push_str(&format!("/// Create a test instance of {}\n", msg.name));
+    s.push_str(&format!(
+        "fn create_test_{}() -> {} {{\n",
+        fn_name, msg.name
+    ));
+    s.push_str(&format!("    {} {{\n", msg.name));
+
+    for field in &msg.fields {
+        let field_name = utils::escape_reserved(&field.name, RUST_RESERVED);
+        let value = generate_test_value(&field.type_ref, &field.name, manifest);
+        s.push_str(&format!("        {}: {},\n", field_name, value));
+    }
+
+    s.push_str("    }\n");
+    s.push_str("}\n\n");
+    s
+}
+
+/// Generate a test value for a given type
+fn generate_test_value(type_ref: &str, field_name: &str, manifest: &SchemaManifest) -> String {
+    // Check if it's an Option type
+    if type_ref.starts_with("Option<") {
+        let inner = &type_ref[7..type_ref.len() - 1];
+        let inner_value = generate_test_value(inner, field_name, manifest);
+        return format!("Some({})", inner_value);
+    }
+
+    // Check if it's a Vec type
+    if type_ref.starts_with("Vec<") {
+        let inner = &type_ref[4..type_ref.len() - 1];
+        let inner_value = generate_test_value(inner, field_name, manifest);
+        return format!("vec![{}]", inner_value);
+    }
+
+    // Primitives
+    match type_ref {
+        "u8" => "42u8".to_string(),
+        "u16" => "1234u16".to_string(),
+        "u32" => "123456u32".to_string(),
+        "u64" => "123456789u64".to_string(),
+        "i8" => "-42i8".to_string(),
+        "i16" => "-1234i16".to_string(),
+        "i32" => "-123456i32".to_string(),
+        "i64" => "-123456789i64".to_string(),
+        "f32" => "3.14159f32".to_string(),
+        "f64" => "2.718281828f64".to_string(),
+        "bool" => "true".to_string(),
+        "String" => format!("\"test_{}\".to_string()", field_name),
+        _ => {
+            // Check if it's a type alias
+            if let Some(alias) = manifest.type_aliases.iter().find(|a| a.name == type_ref) {
+                return generate_test_value(&alias.target, field_name, manifest);
+            }
+
+            // Check if it's an enum
+            if let Some(e) = manifest.enums.iter().find(|e| e.name == type_ref) {
+                if e.is_simple && !e.variants.is_empty() {
+                    return format!("{}::{}", e.name, e.variants[0].name);
+                } else if !e.variants.is_empty() {
+                    // For complex enums, use the first unit variant if available
+                    for v in &e.variants {
+                        if matches!(v.data, VariantData::Unit) {
+                            return format!("{}::{}", e.name, v.name);
+                        }
+                    }
+                    // Otherwise create a simple variant
+                    let v = &e.variants[0];
+                    match &v.data {
+                        VariantData::Unit => format!("{}::{}", e.name, v.name),
+                        VariantData::Tuple { types } => {
+                            let values: Vec<String> = types
+                                .iter()
+                                .enumerate()
+                                .map(|(i, t)| {
+                                    generate_test_value(
+                                        t,
+                                        &format!("{}_{}", field_name, i),
+                                        manifest,
+                                    )
+                                })
+                                .collect();
+                            format!("{}::{}({})", e.name, v.name, values.join(", "))
+                        }
+                        VariantData::Struct { fields } => {
+                            let values: Vec<String> = fields
+                                .iter()
+                                .map(|f| {
+                                    let val = generate_test_value(&f.type_ref, &f.name, manifest);
+                                    format!("{}: {}", f.name, val)
+                                })
+                                .collect();
+                            format!("{}::{} {{ {} }}", e.name, v.name, values.join(", "))
+                        }
+                    }
+                } else {
+                    format!("Default::default() /* {} */", type_ref)
+                }
+            }
+            // Check if it's a struct we know about
+            else if let Some(msg) = manifest.messages.iter().find(|m| m.name == type_ref) {
+                if msg.generics.is_empty() {
+                    format!("create_test_{}()", utils::to_snake_case(type_ref))
+                } else {
+                    format!("Default::default() /* generic {} */", type_ref)
+                }
+            } else {
+                format!("Default::default() /* unknown {} */", type_ref)
+            }
+        }
+    }
+}
+
+/// Generate a roundtrip test for a struct
+fn generate_roundtrip_test(msg: &MessageDef) -> String {
+    let mut s = String::new();
+    let fn_name = utils::to_snake_case(&msg.name);
+
+    s.push_str(&format!("#[test]\n"));
+    s.push_str(&format!("fn test_{}_roundtrip() {{\n", fn_name));
+    s.push_str(&format!("    let original = create_test_{}();\n", fn_name));
+    s.push_str("    \n");
+    s.push_str("    // Encode to bytes\n");
+    s.push_str("    let encoded = original.to_bytes();\n");
+    s.push_str("    \n");
+    s.push_str("    // Verify version byte is present\n");
+    s.push_str("    assert!(!encoded.is_empty(), \"Encoded bytes should not be empty\");\n");
+    s.push_str("    assert_eq!(encoded[0], PROTOCOL_VERSION_BYTE, \"First byte should be version byte\");\n");
+    s.push_str("    \n");
+    s.push_str("    // Decode back\n");
+    s.push_str(&format!(
+        "    let decoded = {}::from_bytes(&encoded).expect(\"Decode should succeed\");\n",
+        msg.name
+    ));
+    s.push_str("    \n");
+    s.push_str("    // Compare\n");
+    s.push_str("    assert_eq!(original, decoded, \"Roundtrip should preserve data\");\n");
+    s.push_str("}\n\n");
+
+    // Also add a raw encode/decode test (without version byte wrapper)
+    s.push_str(&format!("#[test]\n"));
+    s.push_str(&format!("fn test_{}_encode_decode() {{\n", fn_name));
+    s.push_str(&format!("    let original = create_test_{}();\n", fn_name));
+    s.push_str("    \n");
+    s.push_str("    // Encode to buffer\n");
+    s.push_str("    let mut buffer = Vec::new();\n");
+    s.push_str("    original.encode(&mut buffer).expect(\"Encode should succeed\");\n");
+    s.push_str("    \n");
+    s.push_str("    // Decode from buffer\n");
+    s.push_str("    let mut reader = buffer.as_slice();\n");
+    s.push_str(&format!(
+        "    let decoded = {}::decode(&mut reader).expect(\"Decode should succeed\");\n",
+        msg.name
+    ));
+    s.push_str("    \n");
+    s.push_str("    // Compare\n");
+    s.push_str("    assert_eq!(original, decoded);\n");
+    s.push_str("}\n\n");
+
+    s
+}
+
+/// Generate tests for an enum
+fn generate_enum_tests(e: &EnumManifest) -> String {
+    let mut s = String::new();
+    let enum_name = &e.name;
+    let fn_name = utils::to_snake_case(enum_name);
+
+    if e.is_simple {
+        // Test all variants of simple enum
+        s.push_str(&format!("#[test]\n"));
+        s.push_str(&format!("fn test_{}_variants() {{\n", fn_name));
+
+        for v in &e.variants {
+            s.push_str(&format!("    // Test {}::{}\n", enum_name, v.name));
+            s.push_str(&format!("    let variant = {}::{};\n", enum_name, v.name));
+            s.push_str("    let mut buffer = Vec::new();\n");
+            s.push_str("    variant.encode(&mut buffer).expect(\"Encode should succeed\");\n");
+            s.push_str("    let mut reader = buffer.as_slice();\n");
+            s.push_str(&format!(
+                "    let decoded = {}::decode(&mut reader).expect(\"Decode should succeed\");\n",
+                enum_name
+            ));
+            s.push_str("    assert_eq!(variant, decoded);\n");
+            s.push_str("    \n");
+        }
+
+        s.push_str("}\n\n");
+
+        // Test discriminant values
+        s.push_str(&format!("#[test]\n"));
+        s.push_str(&format!("fn test_{}_discriminants() {{\n", fn_name));
+        for v in &e.variants {
+            s.push_str(&format!(
+                "    assert_eq!({}::{} as {}, {});\n",
+                enum_name, v.name, e.repr, v.discriminant
+            ));
+        }
+        s.push_str("}\n\n");
+    } else {
+        // Test complex enum variants
+        s.push_str(&format!("#[test]\n"));
+        s.push_str(&format!("fn test_{}_roundtrip() {{\n", fn_name));
+
+        // Test unit variants
+        for v in &e.variants {
+            if matches!(v.data, VariantData::Unit) {
+                s.push_str(&format!("    // Test {}::{}\n", enum_name, v.name));
+                s.push_str(&format!("    let variant = {}::{};\n", enum_name, v.name));
+                s.push_str("    let mut buffer = Vec::new();\n");
+                s.push_str("    variant.encode(&mut buffer).expect(\"Encode should succeed\");\n");
+                s.push_str("    let mut reader = buffer.as_slice();\n");
+                s.push_str(&format!(
+                    "    let decoded = {}::decode(&mut reader).expect(\"Decode should succeed\");\n",
+                    enum_name
+                ));
+                s.push_str("    assert_eq!(variant, decoded);\n");
+                s.push_str("    \n");
+            }
+        }
+
+        s.push_str("}\n\n");
+    }
+
+    s
+}
+
+/// Generate router tests
+fn generate_router_tests(router: &RouterManifest, manifest: &SchemaManifest) -> String {
+    let mut s = String::new();
+    let router_name = &router.name;
+    let router_fn_name = utils::to_snake_case(router_name);
+
+    // Test tag values are unique and correct
+    s.push_str(&format!("#[test]\n"));
+    s.push_str(&format!("fn test_{}_tag_values() {{\n", router_fn_name));
+    s.push_str("    // Verify each variant has the expected tag\n");
+
+    for v in &router.variants {
+        let tag_const = format!(
+            "{}::{}_TAG",
+            router_name,
+            utils::to_snake_case(&v.name).to_uppercase()
+        );
+        s.push_str(&format!(
+            "    assert_eq!({}, {}, \"Tag for {} should be {}\");\n",
+            tag_const, v.discriminant, v.name, v.discriminant
+        ));
+    }
+
+    s.push_str("}\n\n");
+
+    // Test type_name_from_tag
+    s.push_str(&format!("#[test]\n"));
+    s.push_str(&format!(
+        "fn test_{}_type_name_from_tag() {{\n",
+        router_fn_name
+    ));
+
+    for v in &router.variants {
+        s.push_str(&format!(
+            "    assert_eq!({}::type_name_from_tag({}), Some(\"{}\"));\n",
+            router_name, v.discriminant, v.name
+        ));
+    }
+
+    s.push_str(&format!(
+        "    assert_eq!({}::type_name_from_tag(9999), None);\n",
+        router_name
+    ));
+    s.push_str("}\n\n");
+
+    // Test router roundtrip for each variant
+    s.push_str(&format!("#[test]\n"));
+    s.push_str(&format!("fn test_{}_roundtrip() {{\n", router_fn_name));
+
+    for v in &router.variants {
+        // Only test non-generic message types
+        if let Some(msg) = manifest.messages.iter().find(|m| m.name == v.message_type) {
+            if msg.generics.is_empty() {
+                let msg_fn_name = utils::to_snake_case(&v.message_type);
+                s.push_str(&format!("    // Test {}::{}\n", router_name, v.name));
+                s.push_str(&format!(
+                    "    let msg = {}::{}(create_test_{}());\n",
+                    router_name, v.name, msg_fn_name
+                ));
+                s.push_str(&format!(
+                    "    assert_eq!(msg.tag(), {}::{}_TAG);\n",
+                    router_name,
+                    utils::to_snake_case(&v.name).to_uppercase()
+                ));
+                s.push_str("    let encoded = msg.to_bytes();\n");
+                s.push_str(&format!(
+                    "    let decoded = {}::from_bytes(&encoded).expect(\"Decode should succeed\");\n",
+                    router_name
+                ));
+                s.push_str("    assert_eq!(msg, decoded);\n");
+                s.push_str("    \n");
+            }
+        }
+    }
+
+    s.push_str("}\n\n");
+
+    // Test handler trait
+    s.push_str(&format!("/// Test handler for {}\n", router_name));
+    s.push_str(&format!("struct Test{}Handler {{\n", router_name));
+    s.push_str("    calls: Vec<String>,\n");
+    s.push_str("}\n\n");
+
+    s.push_str(&format!(
+        "impl {}Handler for Test{}Handler {{\n",
+        router_name, router_name
+    ));
+    s.push_str("    type Output = ();\n\n");
+
+    for v in &router.variants {
+        let handler_fn = utils::to_snake_case(&v.name);
+        s.push_str(&format!(
+            "    fn handle_{}(&mut self, _msg: {}) -> Self::Output {{\n",
+            handler_fn, v.message_type
+        ));
+        s.push_str(&format!(
+            "        self.calls.push(\"{}\".to_string());\n",
+            v.name
+        ));
+        s.push_str("    }\n");
+    }
+
+    s.push_str("}\n\n");
+
+    // Test that handler is called correctly
+    s.push_str(&format!("#[test]\n"));
+    s.push_str(&format!("fn test_{}_handler() {{\n", router_fn_name));
+    s.push_str(&format!(
+        "    let mut handler = Test{}Handler {{ calls: Vec::new() }};\n",
+        router_name
+    ));
+    s.push_str("    \n");
+
+    // Route first non-generic message
+    for v in &router.variants {
+        if let Some(msg) = manifest.messages.iter().find(|m| m.name == v.message_type) {
+            if msg.generics.is_empty() {
+                let msg_fn_name = utils::to_snake_case(&v.message_type);
+                s.push_str(&format!(
+                    "    let msg = {}::{}(create_test_{}());\n",
+                    router_name, v.name, msg_fn_name
+                ));
+                s.push_str("    msg.route(&mut handler);\n");
+                s.push_str(&format!(
+                    "    assert_eq!(handler.calls.last(), Some(&\"{}\".to_string()));\n",
+                    v.name
+                ));
+                s.push_str("    \n");
+                break; // Just test one for brevity
+            }
+        }
+    }
+
+    s.push_str("}\n\n");
+
+    s
+}
+
+/// Generate version byte validation tests
+fn generate_version_tests(manifest: &SchemaManifest) -> String {
+    let mut s = String::new();
+
+    s.push_str(
+        r#"
+// ============================================================================
+// Version Byte Tests
+// ============================================================================
+
+#[test]
+fn test_protocol_version_byte() {
+"#,
+    );
+
+    s.push_str(&format!(
+        "    assert_eq!(PROTOCOL_VERSION_BYTE, 0x{:02X});\n",
+        manifest.meta.version_byte
+    ));
+
+    s.push_str("}\n\n");
+
+    s.push_str("#[test]\n");
+    s.push_str("fn test_version_mismatch_rejected() {\n");
+    s.push_str("    // Create a packet with wrong version byte\n");
+    s.push_str("    let bad_packet = vec![0x00, 0x01, 0x02, 0x03];\n");
+    s.push_str("    \n");
+
+    // Use first non-generic message for test
+    if let Some(msg) = manifest.messages.iter().find(|m| m.generics.is_empty()) {
+        s.push_str(&format!(
+            "    let result = {}::from_bytes(&bad_packet);\n",
+            msg.name
+        ));
+        s.push_str(
+            "    assert!(result.is_err(), \"Should reject packet with wrong version byte\");\n",
+        );
+    }
+
+    s.push_str("}\n\n");
+
+    s.push_str("#[test]\n");
+    s.push_str("fn test_empty_packet_rejected() {\n");
+    s.push_str("    let empty_packet: Vec<u8> = vec![];\n");
+
+    if let Some(msg) = manifest.messages.iter().find(|m| m.generics.is_empty()) {
+        s.push_str(&format!(
+            "    let result = {}::from_bytes(&empty_packet);\n",
+            msg.name
+        ));
+        s.push_str("    assert!(result.is_err(), \"Should reject empty packet\");\n");
+    }
+
+    s.push_str("}\n\n");
+
+    s
 }
