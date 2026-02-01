@@ -1,37 +1,47 @@
-# Motto
+# Motto: The Minimalist Bit-Level Toolchain
 
-**Compiler-as-a-Service: Turn Rust `schema.rs` into multi-platform SDK toolkits**
+**Motto** turns your Rust structs into high-performance, bit-packed binary protocols with automated multi-platform SDK generation. Optimized for extreme efficiency on low-resource environments (e.g., 2GB RAM VPS).
 
-Motto is a code generation tool that transforms Rust struct and enum definitions into platform-specific SDK code for multiple targets: TypeScript/WASM, Swift, Kotlin, and Unity/C#.
+## Why Motto?
 
-## Architecture
+**The Problem**: You're building a real-time multiplayer game or IoT system. You need:
+- Consistent data types across server, web, mobile, and game clients
+- Binary protocols that don't waste bandwidth
+- Infrastructure that doesn't cost $500/month
 
-Motto follows a three-phase compiler architecture:
+**The Solution**: Define your types once in plain Rust. Motto generates everything else.
 
-### 1. Static Analysis Frontend
-- Uses the `syn` crate to parse Rust AST
-- Extracts structs and enums annotated with `#[derive(Serialize, Deserialize)]`
-- Computes SHA-256 fingerprint for detecting schema changes
+```rust
+// src/schema.rs
+// No serde, no manual routing, no boilerplate.
 
-### 2. Intermediate Representation (IR)
-- Generates language-agnostic JSON/BSON manifest
-- Includes field offsets and bit-alignment requirements
-- Supports packed and aligned layouts for Bitcode backend
+struct Player {
+    id: u64,
+    position: Position,
+    health: u8,
+}
 
-### 3. Backend Emitters
-- **TypeScript/WASM**: ESM-compliant TypeScript with conditional exports for WASM or Native Addon (napi-rs)
-- **Swift**: Native iOS/macOS SDK with Codable conformance
-- **Kotlin**: Android/JVM SDK with kotlinx.serialization support
-- **Unity/C#**: C# wrappers with unsafe pointers for memory-efficient DllImport
+struct Position {
+    x: f32,
+    y: f32,
+}
+
+struct ChatMessage {
+    from: u64,
+    content: String,
+}
+
+// Motto automatically aggregates these into a bit-optimized message router.
+```
 
 ## Features
 
-- 🔒 **Single-Version Policy**: 1-byte version header in all packets for sidecar routing
-- 📦 **Zero-Copy Interfaces**: Efficient packet framing across all platforms
-- 🔄 **Schema Fingerprinting**: SHA-256 hashes detect breaking changes
-- 📋 **motto.lock**: Immutable versioning authority for schema evolution
-- 🗜️ **Zstd Compression**: Built-in compression support in runtime
-- 📡 **WebTransport Ready**: Transport layer abstraction included
+- **Zero Dependencies in Schema**: No `serde` derives required. Just plain Rust structs.
+- **Implicit Message Router**: Individual structs are automatically aggregated into a single, bit-optimized router enum.
+- **Bit-Level Packing**: Computes minimal bit-width for enum variants, skipping standard byte-alignment where possible.
+- **A/B Deployment Ready**: 1-byte version header enables automatic traffic routing between protocol versions on your infrastructure.
+- **Infrastructure Agnostic**: Works with WebTransport, WebSocket, NATS Core, or raw TCP. Bring your own transport.
+- **Multi-Platform SDKs**: TypeScript/WASM, Swift, Kotlin, Unity/C# — all from one schema.
 
 ## Installation
 
@@ -42,7 +52,7 @@ cargo install motto --bin motto-cli
 Or build from source:
 
 ```bash
-git clone https://github.com/mottomesh/motto
+git clone https://github.com/bowber/motto
 cd motto
 cargo build --release
 ```
@@ -64,28 +74,33 @@ This creates:
 
 ```rust
 // src/schema.rs
-use serde::{Serialize, Deserialize};
+// Clean, minimal, no ceremony.
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Player {
-    pub id: u64,
-    pub name: String,
-    pub position: Position,
-    pub health: u8,
+struct Player {
+    id: u64,
+    position: Position,
+    health: u8,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct Position {
-    pub x: f32,
-    pub y: f32,
+struct Position {
+    x: f32,
+    y: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum GameEvent {
-    PlayerJoined { player: Player },
-    PlayerMoved(u64, Position),
-    PlayerLeft { player_id: u64 },
+struct PlayerJoined {
+    player: Player,
 }
+
+struct PlayerMoved {
+    player_id: u64,
+    position: Position,
+}
+
+struct PlayerLeft {
+    player_id: u64,
+}
+
+// That's it. Motto handles the rest.
 ```
 
 ### 3. Generate SDKs
@@ -106,6 +121,56 @@ motto-cli generate --wasm
 ```bash
 motto-cli lock --bump minor
 ```
+
+## Architecture
+
+Motto follows a three-phase compiler architecture:
+
+### 1. Static Analysis Frontend
+- Parses plain Rust structs (no macro annotations required)
+- Computes schema fingerprint for change detection
+
+### 2. Intermediate Representation (IR)
+- **Implicit Routing**: Automatically aggregates individual structs into a single, bit-optimized router enum
+- **Bit-Level Packing**: Computes minimal bit-width for enum variants and field offsets, skipping standard byte-alignment where possible
+- Generates language-agnostic manifest with field offsets
+
+### 3. Backend Emitters
+- **TypeScript/WASM**: ESM-compliant TypeScript with conditional exports for WASM or Native Addon
+- **Swift**: Native iOS/macOS SDK with Codable conformance
+- **Kotlin**: Android/JVM SDK with kotlinx.serialization support
+- **Unity/C#**: C# wrappers with unsafe pointers for memory-efficient DllImport
+
+## Deployment Philosophy: The $5 Stack
+
+Motto isn't just about code generation; it's about making distributed systems affordable. By pairing the generated SDK with the **Mottomesh Template**, you can run a full production stack:
+
+| Component | Implementation | Memory |
+|-----------|---------------|--------|
+| Gateway | Rust WebTransport/WebSocket bridge | ~30MB |
+| Message Bus | NATS Core (stateless) | ~20MB |
+| Game Server | Your Rust logic | ~50MB |
+| **Total** | | **<100MB** |
+
+This allows you to host a real-time cluster on a **$5/mo VPS** without breaking a sweat.
+
+### A/B Deployment with Version Routing
+
+The 1-byte version header isn't just for "detecting" protocol changes — it enables **automatic traffic routing**:
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────┐
+│   Client    │────▶│  Gateway/Sidecar │────▶│  Server v2  │
+│ (version 2) │     │   Routes by Ver  │     └─────────────┘
+└─────────────┘     │                  │     ┌─────────────┐
+                    │                  │────▶│  Server v1  │
+┌─────────────┐     │                  │     │  (legacy)   │
+│   Client    │────▶│                  │     └─────────────┘
+│ (version 1) │     └──────────────────┘
+└─────────────┘
+```
+
+Deploy new versions alongside old ones. Migrate clients gradually. Zero downtime.
 
 ## CLI Commands
 
@@ -149,29 +214,14 @@ generated/
         └── NativeBridge.cs
 ```
 
-## Protocol Version Byte
-
-All generated packets include a 1-byte version header derived from `motto.lock`:
-
-```
-+--------+--------------------+
-| Ver(1) |     Payload        |
-+--------+--------------------+
-```
-
-This enables:
-- Sidecar routing based on protocol version
-- Backward compatibility detection
-- Traffic multiplexing by version
-
 ## Runtime Features
 
 The generated SDKs include:
 
 - **PacketBuilder/PacketView**: Zero-copy packet construction and parsing
 - **State Machine**: Connection state management with retry logic
-- **Compression**: Zstd compression/decompression (where supported)
-- **Transport Abstraction**: WebTransport-ready interfaces
+- **Compression**: Optional Zstd compression/decompression
+- **Transport Abstraction**: Plug in WebTransport, WebSocket, NATS, or raw TCP
 
 ## Supported Types
 
