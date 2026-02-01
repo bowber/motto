@@ -214,6 +214,275 @@ generated/
         └── NativeBridge.cs
 ```
 
+## Using the Generated SDKs
+
+The best practice is to **publish your generated SDK to a package registry** and import it like any other dependency. This keeps your application code clean and your protocol versioned.
+
+### TypeScript / Node.js
+
+**1. Publish to npm (or use a private registry):**
+
+```bash
+cd generated/typescript
+npm run build
+npm publish --access public
+# or for private: npm publish --registry https://your-registry.com
+```
+
+**2. Install in your application:**
+
+```bash
+npm install @motto/schema
+# or with your custom package name
+```
+
+**3. Use in your code:**
+
+```typescript
+import {
+  // Types
+  Player,
+  Position,
+  ClientMessage,
+  ServerMessage,
+  
+  // Codec
+  encodePosition,
+  decodePosition,
+  PacketBuilder,
+  PacketView,
+  PROTOCOL_VERSION_BYTE,
+  
+  // Runtime
+  MottoTransport,
+  ConnectionState,
+} from '@motto/schema';
+
+// Create a player position
+const pos: Position = { x: 100.5, y: 200.3 };
+
+// Encode to binary (includes version byte header)
+const encoded = encodePosition(pos);
+console.log(`Encoded ${encoded.byteLength} bytes, version: 0x${encoded[0].toString(16)}`);
+
+// Decode back
+const decoded = decodePosition(encoded);
+console.log(`Position: (${decoded.x}, ${decoded.y})`);
+
+// Build custom packets with PacketBuilder
+const builder = new PacketBuilder();
+builder.writeU64(BigInt(12345));  // player_id
+builder.writeF32(pos.x);
+builder.writeF32(pos.y);
+const packet = builder.build();
+
+// Connect via WebTransport
+const transport = new MottoTransport('https://your-server.com/game');
+await transport.connect();
+await transport.sendDatagram(packet);
+```
+
+### Swift / iOS / macOS
+
+**1. Add as a Swift Package dependency:**
+
+```swift
+// In your Package.swift or Xcode project
+dependencies: [
+    .package(url: "https://github.com/your-org/motto-schema-swift", from: "0.1.0"),
+    // Or use a local path during development:
+    // .package(path: "../generated/swift")
+]
+```
+
+**2. Use in your code:**
+
+```swift
+import MottoSDK
+
+// Types are ready to use
+let position = Position(x: 100.5, y: 200.3)
+let player = Player(
+    id: 12345,
+    name: "Alice",
+    position: position,
+    velocity: Velocity(dx: 0, dy: 0),
+    health: 100,
+    score: 0,
+    status: .online,
+    avatarUrl: nil
+)
+
+// Encode to binary
+let encoded = Codec.encodePosition(position)
+print("Encoded \(encoded.count) bytes")
+
+// Decode back  
+let decoded = Codec.decodePosition(encoded)
+print("Position: (\(decoded.x), \(decoded.y))")
+
+// Use the transport layer
+let transport = MottoTransport(url: "https://your-server.com/game")
+try await transport.connect()
+try await transport.send(encoded)
+```
+
+### Kotlin / Android / JVM
+
+**1. Publish to Maven (or use a local dependency):**
+
+```bash
+cd generated/kotlin
+./gradlew publishToMavenLocal
+# or publish to your Maven repository
+```
+
+**2. Add dependency in your app's `build.gradle.kts`:**
+
+```kotlin
+dependencies {
+    implementation("io.motto:schema:0.1.0")
+}
+```
+
+**3. Use in your code:**
+
+```kotlin
+import io.motto.sdk.*
+
+// Create types
+val position = Position(x = 100.5f, y = 200.3f)
+val player = Player(
+    id = 12345u,
+    name = "Alice",
+    position = position,
+    velocity = Velocity(dx = 0f, dy = 0f),
+    health = 100u,
+    score = 0u,
+    status = PlayerStatus.Online,
+    avatarUrl = null
+)
+
+// Encode/decode
+val encoded = Codec.encodePosition(position)
+println("Encoded ${encoded.size} bytes")
+
+val decoded = Codec.decodePosition(encoded)
+println("Position: (${decoded.x}, ${decoded.y})")
+
+// Use with coroutines
+val transport = MottoTransport("https://your-server.com/game")
+transport.connect()
+transport.send(encoded)
+```
+
+### Unity / C#
+
+**1. Copy the generated SDK to your Unity project:**
+
+```bash
+cp -r generated/unity/MottoSDK Assets/Plugins/
+```
+
+Or add as a Unity Package (add to `Packages/manifest.json`):
+
+```json
+{
+  "dependencies": {
+    "com.motto.sdk": "file:../../generated/unity/MottoSDK"
+  }
+}
+```
+
+**2. Use in your C# scripts:**
+
+```csharp
+using Motto.SDK;
+using UnityEngine;
+
+public class GameClient : MonoBehaviour
+{
+    private MottoTransport transport;
+
+    async void Start()
+    {
+        // Create types
+        var position = new Position { X = 100.5f, Y = 200.3f };
+        var player = new Player
+        {
+            Id = 12345,
+            Name = "Alice",
+            Position = position,
+            Health = 100,
+            Score = 0,
+            Status = PlayerStatus.Online
+        };
+
+        // Encode to binary
+        byte[] encoded = Codec.EncodePosition(position);
+        Debug.Log($"Encoded {encoded.Length} bytes, version: 0x{encoded[0]:X2}");
+
+        // Decode back
+        Position decoded = Codec.DecodePosition(encoded);
+        Debug.Log($"Position: ({decoded.X}, {decoded.Y})");
+
+        // Connect and send
+        transport = new MottoTransport("wss://your-server.com/game");
+        await transport.ConnectAsync();
+        await transport.SendAsync(encoded);
+    }
+
+    void OnDestroy()
+    {
+        transport?.Dispose();
+    }
+}
+```
+
+## CI/CD Integration
+
+Automate SDK generation and publishing in your pipeline:
+
+```yaml
+# .github/workflows/sdk.yml
+name: Generate & Publish SDKs
+
+on:
+  push:
+    paths: ['src/schema.rs']
+    branches: [main]
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Motto CLI
+        run: cargo install motto --bin motto-cli
+      
+      - name: Check for breaking changes
+        run: motto-cli check
+      
+      - name: Generate SDKs
+        run: motto-cli generate
+      
+      - name: Publish TypeScript SDK
+        run: |
+          cd generated/typescript
+          npm run build
+          npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      
+      - name: Publish Swift SDK
+        run: |
+          cd generated/swift
+          git init && git add .
+          git commit -m "SDK v$(cat ../../motto.lock | jq -r .version)"
+          git push --force https://x:${{ secrets.GH_TOKEN }}@github.com/your-org/motto-schema-swift main
+```
+
 ## Runtime Features
 
 The generated SDKs include:
