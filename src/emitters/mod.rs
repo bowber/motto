@@ -4,6 +4,7 @@
 //! Implements Single-Version Policy with 1-byte version header.
 
 pub mod kotlin;
+pub mod rust;
 pub mod swift;
 pub mod typescript;
 pub mod unity;

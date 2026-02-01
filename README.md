@@ -41,7 +41,7 @@ struct ChatMessage {
 - **Bit-Level Packing**: Computes minimal bit-width for enum variants, skipping standard byte-alignment where possible.
 - **A/B Deployment Ready**: 1-byte version header enables automatic traffic routing between protocol versions on your infrastructure.
 - **Infrastructure Agnostic**: Works with WebTransport, WebSocket, NATS Core, or raw TCP. Bring your own transport.
-- **Multi-Platform SDKs**: TypeScript/WASM, Swift, Kotlin, Unity/C# — all from one schema.
+- **Multi-Platform SDKs**: TypeScript/WASM, Swift, Kotlin, Unity/C#, and Rust — all from one schema.
 
 ## Installation
 
@@ -110,7 +110,7 @@ struct PlayerLeft {
 motto-cli generate
 
 # Generate specific platforms
-motto-cli generate --targets typescript,swift
+motto-cli generate --targets typescript,swift,rust
 
 # With WASM bindings
 motto-cli generate --wasm
@@ -140,6 +140,7 @@ Motto follows a three-phase compiler architecture:
 - **Swift**: Native iOS/macOS SDK with Codable conformance
 - **Kotlin**: Android/JVM SDK with kotlinx.serialization support
 - **Unity/C#**: C# wrappers with unsafe pointers for memory-efficient DllImport
+- **Rust**: Native Rust crate with zero-copy codec and Handler trait for routing
 
 ## Deployment Philosophy: Scale From Small to Large
 
@@ -190,6 +191,11 @@ generated/
 │       ├── codec.ts      # Binary encoding/decoding
 │       ├── runtime.ts    # State machine, transport
 │       └── index.ts      # Exports
+├── rust/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs        # Types + Router enum + Handler trait
+│       └── codec.rs      # Encode/Decode implementations
 ├── swift/
 │   ├── Package.swift
 │   └── Sources/MottoSDK/
@@ -214,6 +220,158 @@ generated/
 ## Using the Generated SDKs
 
 The best practice is to **publish your generated SDK to a package registry** and import it like any other dependency. This keeps your application code clean and your protocol versioned.
+
+### Rust (Server-side or Native Clients)
+
+The Rust SDK is ideal for building game servers, native clients, or any Rust application that needs to communicate with other Motto-generated SDKs.
+
+**1. Add as a dependency:**
+
+```bash
+cd generated/rust
+cargo publish
+# or for local development, add to your Cargo.toml:
+# [dependencies]
+# my_schema = { path = "../generated/rust" }
+```
+
+**2. Basic encode/decode:**
+
+```rust
+use my_schema::{Position, Player, PlayerStatus};
+use my_schema::codec::{Encode, Decode};
+
+// Create types
+let position = Position { x: 100.5, y: 200.3 };
+let player = Player {
+    id: 12345,
+    name: "Alice".to_string(),
+    position: Position { x: 0.0, y: 0.0 },
+    velocity: Velocity { dx: 0.0, dy: 0.0 },
+    health: 100,
+    score: 0,
+    status: PlayerStatus::Online,
+    avatar_url: None,
+};
+
+// Encode to binary (includes version byte header)
+let encoded = position.to_bytes();
+println!("Encoded {} bytes, version: 0x{:02X}", encoded.len(), encoded[0]);
+
+// Decode back
+let decoded = Position::from_bytes(&encoded)?;
+println!("Position: ({}, {})", decoded.x, decoded.y);
+```
+
+**3. Message routing with match:**
+
+The generated `SchemaRouter` enum wraps all non-generic message types for type-safe routing:
+
+```rust
+use my_schema::{ExampleSchemaRouter, Position, Player, GameState};
+use my_schema::codec::Decode;
+
+fn handle_message(bytes: &[u8]) -> Result<(), std::io::Error> {
+    let message = ExampleSchemaRouter::from_bytes(bytes)?;
+    
+    match message {
+        ExampleSchemaRouter::Position(pos) => {
+            println!("Got position: ({}, {})", pos.x, pos.y);
+        }
+        ExampleSchemaRouter::Player(player) => {
+            println!("Got player: {} (id={})", player.name, player.id);
+        }
+        ExampleSchemaRouter::GameState(state) => {
+            println!("Got game state, tick={}", state.tick);
+        }
+        // ... handle other variants
+        _ => {
+            println!("Unknown message type, tag={}", message.tag());
+        }
+    }
+    
+    Ok(())
+}
+```
+
+**4. Handler trait pattern:**
+
+For more structured routing, implement the generated Handler trait:
+
+```rust
+use my_schema::{
+    ExampleSchemaRouter, ExampleSchemaRouterHandler,
+    Position, Velocity, Player, RoomConfig, GameState, PlayerUpdate,
+};
+
+struct MyHandler {
+    player_count: usize,
+}
+
+impl ExampleSchemaRouterHandler for MyHandler {
+    type Output = Result<(), String>;
+    
+    fn handle_position(&mut self, pos: Position) -> Self::Output {
+        println!("Position update: ({}, {})", pos.x, pos.y);
+        Ok(())
+    }
+    
+    fn handle_player(&mut self, player: Player) -> Self::Output {
+        self.player_count += 1;
+        println!("Player joined: {} (total: {})", player.name, self.player_count);
+        Ok(())
+    }
+    
+    fn handle_game_state(&mut self, state: GameState) -> Self::Output {
+        println!("State sync: {} players, tick {}", state.players.len(), state.tick);
+        Ok(())
+    }
+    
+    // ... implement other handlers
+    fn handle_velocity(&mut self, _: Velocity) -> Self::Output { Ok(()) }
+    fn handle_room_config(&mut self, _: RoomConfig) -> Self::Output { Ok(()) }
+    fn handle_player_update(&mut self, _: PlayerUpdate) -> Self::Output { Ok(()) }
+}
+
+// Use it:
+fn process_message(bytes: &[u8], handler: &mut MyHandler) -> Result<(), String> {
+    let message = ExampleSchemaRouter::from_bytes(bytes)
+        .map_err(|e| e.to_string())?;
+    message.route(handler)
+}
+```
+
+**5. Use with async runtime (tokio example):**
+
+```rust
+use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use my_schema::{Position, GameState};
+use my_schema::codec::{Encode, Decode};
+
+async fn game_client() -> std::io::Result<()> {
+    let mut stream = TcpStream::connect("127.0.0.1:8080").await?;
+    
+    // Send position update
+    let pos = Position { x: 100.0, y: 200.0 };
+    let bytes = pos.to_bytes();
+    stream.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
+    stream.write_all(&bytes).await?;
+    
+    // Read response
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await?;
+    
+    let state = GameState::from_bytes(&buf)?;
+    println!("Got state with {} players", state.players.len());
+    
+    Ok(())
+}
+```
 
 ### TypeScript / Node.js
 
@@ -491,18 +649,18 @@ The generated SDKs include:
 
 ## Supported Types
 
-| Rust Type | TypeScript | Swift | Kotlin | C# |
-|-----------|------------|-------|--------|-----|
-| `u8`/`i8` | `number` | `UInt8`/`Int8` | `UByte`/`Byte` | `byte`/`sbyte` |
-| `u16`/`i16` | `number` | `UInt16`/`Int16` | `UShort`/`Short` | `ushort`/`short` |
-| `u32`/`i32` | `number` | `UInt32`/`Int32` | `UInt`/`Int` | `uint`/`int` |
-| `u64`/`i64` | `bigint` | `UInt64`/`Int64` | `ULong`/`Long` | `ulong`/`long` |
-| `f32`/`f64` | `number` | `Float`/`Double` | `Float`/`Double` | `float`/`double` |
-| `bool` | `boolean` | `Bool` | `Boolean` | `bool` |
-| `String` | `string` | `String` | `String` | `string` |
-| `Vec<T>` | `T[]` | `[T]` | `List<T>` | `T[]` |
-| `Option<T>` | `T \| undefined` | `T?` | `T?` | `T?` |
-| `HashMap<K,V>` | `Map<K,V>` | `[K: V]` | `Map<K,V>` | `Dictionary<K,V>` |
+| Rust Type | TypeScript | Swift | Kotlin | C# | Rust SDK |
+|-----------|------------|-------|--------|-----|----------|
+| `u8`/`i8` | `number` | `UInt8`/`Int8` | `UByte`/`Byte` | `byte`/`sbyte` | `u8`/`i8` |
+| `u16`/`i16` | `number` | `UInt16`/`Int16` | `UShort`/`Short` | `ushort`/`short` | `u16`/`i16` |
+| `u32`/`i32` | `number` | `UInt32`/`Int32` | `UInt`/`Int` | `uint`/`int` | `u32`/`i32` |
+| `u64`/`i64` | `bigint` | `UInt64`/`Int64` | `ULong`/`Long` | `ulong`/`long` | `u64`/`i64` |
+| `f32`/`f64` | `number` | `Float`/`Double` | `Float`/`Double` | `float`/`double` | `f32`/`f64` |
+| `bool` | `boolean` | `Bool` | `Boolean` | `bool` | `bool` |
+| `String` | `string` | `String` | `String` | `string` | `String` |
+| `Vec<T>` | `T[]` | `[T]` | `List<T>` | `T[]` | `Vec<T>` |
+| `Option<T>` | `T \| undefined` | `T?` | `T?` | `T?` | `Option<T>` |
+| `HashMap<K,V>` | `Map<K,V>` | `[K: V]` | `Map<K,V>` | `Dictionary<K,V>` | `HashMap<K,V>` |
 
 ## License
 

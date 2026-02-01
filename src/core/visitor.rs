@@ -3,19 +3,23 @@
 use crate::core::types::*;
 use syn::{
     Attribute as SynAttr, Expr, Fields, File, GenericParam as SynGenericParam, Item, Type, Variant,
+    Visibility,
 };
 
 /// Visitor that extracts schema information from syn AST
 pub struct SchemaVisitor {
     schema: Schema,
     required_attrs: Vec<String>,
+    /// Only include public types
+    pub_only: bool,
 }
 
 impl SchemaVisitor {
-    pub fn new(required_attrs: &[String]) -> Self {
+    pub fn new(required_attrs: &[String], pub_only: bool) -> Self {
         Self {
             schema: Schema::new("schema"),
             required_attrs: required_attrs.to_vec(),
+            pub_only,
         }
     }
 
@@ -34,10 +38,15 @@ impl SchemaVisitor {
     }
 
     fn visit_struct(&mut self, s: &syn::ItemStruct) {
-        let attrs = convert_attributes(&s.attrs);
-        let serializable = self.is_serializable(&attrs);
+        // Check visibility
+        if self.pub_only && !is_public(&s.vis) {
+            return;
+        }
 
-        // Skip if no required attributes and we have requirements
+        let attrs = convert_attributes(&s.attrs);
+        let serializable = self.check_serializable(&attrs);
+
+        // Skip if we require specific attributes and none match
         if !self.required_attrs.is_empty() && !serializable {
             return;
         }
@@ -79,15 +88,21 @@ impl SchemaVisitor {
             attributes: attrs,
             docs: extract_docs(&s.attrs),
             generics,
-            serializable,
+            // In default mode (no required attrs), all types are considered serializable
+            serializable: self.required_attrs.is_empty() || serializable,
         });
     }
 
     fn visit_enum(&mut self, e: &syn::ItemEnum) {
-        let attrs = convert_attributes(&e.attrs);
-        let serializable = self.is_serializable(&attrs);
+        // Check visibility
+        if self.pub_only && !is_public(&e.vis) {
+            return;
+        }
 
-        // Skip if no required attributes and we have requirements
+        let attrs = convert_attributes(&e.attrs);
+        let serializable = self.check_serializable(&attrs);
+
+        // Skip if we require specific attributes and none match
         if !self.required_attrs.is_empty() && !serializable {
             return;
         }
@@ -103,12 +118,18 @@ impl SchemaVisitor {
             attributes: attrs,
             docs: extract_docs(&e.attrs),
             generics,
-            serializable,
+            // In default mode (no required attrs), all types are considered serializable
+            serializable: self.required_attrs.is_empty() || serializable,
             repr,
         });
     }
 
     fn visit_type_alias(&mut self, t: &syn::ItemType) {
+        // Check visibility for type aliases too
+        if self.pub_only && !is_public(&t.vis) {
+            return;
+        }
+
         self.schema.type_aliases.push(TypeAlias {
             name: t.ident.to_string(),
             target: convert_type(&t.ty),
@@ -116,7 +137,7 @@ impl SchemaVisitor {
         });
     }
 
-    fn is_serializable(&self, attrs: &[Attribute]) -> bool {
+    fn check_serializable(&self, attrs: &[Attribute]) -> bool {
         // Check for derive(Serialize, Deserialize) or motto attribute
         for attr in attrs {
             // Check derive macro for Serialize/Deserialize
@@ -390,3 +411,8 @@ fn convert_generics(generics: &syn::Generics) -> Vec<GenericParam> {
 }
 
 use quote::ToTokens;
+
+/// Check if a visibility is public (pub, pub(crate), pub(super), etc.)
+fn is_public(vis: &Visibility) -> bool {
+    !matches!(vis, Visibility::Inherited)
+}

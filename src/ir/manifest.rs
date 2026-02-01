@@ -17,6 +17,12 @@ pub struct SchemaManifest {
     pub messages: Vec<MessageDef>,
     /// All enum definitions
     pub enums: Vec<EnumManifest>,
+    /// Type aliases (e.g., `type PlayerId = u64`)
+    pub type_aliases: Vec<TypeAliasManifest>,
+    /// Implicit router enum (auto-generated from all message types)
+    /// This allows type-safe routing of incoming messages
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub router: Option<RouterManifest>,
 }
 
 /// Metadata about the manifest
@@ -203,6 +209,44 @@ pub enum VariantData {
     Tuple { types: Vec<String> },
     /// Struct data
     Struct { fields: Vec<FieldManifest> },
+}
+
+/// Implicit router manifest - auto-generated enum for message routing
+///
+/// This creates a `SchemaRouter` enum that wraps all message types,
+/// allowing type-safe message routing without manual enum definitions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouterManifest {
+    /// Router enum name (e.g., "ExampleSchemaRouter")
+    pub name: String,
+    /// All message variants
+    pub variants: Vec<RouterVariant>,
+    /// Documentation
+    pub docs: Option<String>,
+}
+
+/// A variant in the router enum
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouterVariant {
+    /// Variant name (same as the struct name)
+    pub name: String,
+    /// The message type this variant wraps
+    pub message_type: String,
+    /// Discriminant value (auto-assigned)
+    pub discriminant: u16,
+    /// Documentation (copied from struct)
+    pub docs: Option<String>,
+}
+
+/// Type alias manifest (e.g., `type PlayerId = u64`)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeAliasManifest {
+    /// Alias name
+    pub name: String,
+    /// Target type
+    pub target: String,
+    /// Documentation
+    pub docs: Option<String>,
 }
 
 impl SchemaManifest {

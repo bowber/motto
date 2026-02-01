@@ -59,7 +59,7 @@ struct GenerateArgs {
     output: PathBuf,
 
     /// Target platforms to generate (comma-separated)
-    /// Options: typescript, swift, kotlin, unity, all
+    /// Options: typescript, swift, kotlin, unity, rust, all
     #[arg(short, long, default_value = "all")]
     targets: String,
 
@@ -176,10 +176,9 @@ fn cmd_init(args: InitArgs) -> Result<()> {
 fn cmd_generate(args: GenerateArgs) -> Result<()> {
     info!("Generating SDKs from {:?}", args.schema);
 
-    // Parse schema
-    let source = std::fs::read_to_string(&args.schema).context("Failed to read schema file")?;
+    // Parse schema (use parse_file to get proper schema name from file)
     let parser = SchemaParser::new();
-    let schema = parser.parse(&source)?;
+    let schema = parser.parse_file(&args.schema)?;
 
     // Generate fingerprint
     let fingerprint = SchemaFingerprint::compute(&schema);
@@ -191,7 +190,7 @@ fn cmd_generate(args: GenerateArgs) -> Result<()> {
 
     // Parse targets
     let targets: Vec<&str> = if args.targets == "all" {
-        vec!["typescript", "swift", "kotlin", "unity"]
+        vec!["typescript", "swift", "kotlin", "unity", "rust"]
     } else {
         args.targets.split(',').map(|s| s.trim()).collect()
     };
@@ -215,6 +214,7 @@ fn cmd_generate(args: GenerateArgs) -> Result<()> {
             "swift" => motto::emitters::swift::emit(&config)?,
             "kotlin" => motto::emitters::kotlin::emit(&config)?,
             "unity" => motto::emitters::unity::emit(&config)?,
+            "rust" => motto::emitters::rust::emit(&config)?,
             _ => anyhow::bail!("Unknown target: {}", target),
         }
     }
@@ -229,9 +229,8 @@ fn cmd_check(args: CheckArgs) -> Result<()> {
     info!("Checking schema compatibility...");
 
     // Parse current schema
-    let source = std::fs::read_to_string(&args.schema).context("Failed to read schema file")?;
     let parser = SchemaParser::new();
-    let schema = parser.parse(&source)?;
+    let schema = parser.parse_file(&args.schema)?;
     let fingerprint = SchemaFingerprint::compute(&schema);
 
     // Load motto.lock
@@ -264,9 +263,8 @@ fn cmd_lock(args: LockArgs) -> Result<()> {
     info!("Updating motto.lock...");
 
     // Parse schema
-    let source = std::fs::read_to_string(&args.schema).context("Failed to read schema file")?;
     let parser = SchemaParser::new();
-    let schema = parser.parse(&source)?;
+    let schema = parser.parse_file(&args.schema)?;
     let fingerprint = SchemaFingerprint::compute(&schema);
 
     // Load or create motto.lock

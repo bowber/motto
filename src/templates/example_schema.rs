@@ -1,10 +1,8 @@
 //! Example Schema for Motto SDK Generation
 //!
-//! This file demonstrates the schema format expected by motto-cli.
-//! Types annotated with `#[derive(Serialize, Deserialize)]` or `#[motto]`
-//! will be included in the generated SDK.
-
-use serde::{Deserialize, Serialize};
+//! This file demonstrates Motto's "zero dependencies" philosophy.
+//! Just write plain Rust structs and enums - no serde, no macros, no annotations.
+//! Motto parses your types and generates fully-typed SDKs for all platforms.
 
 // ============================================================================
 // Basic Types
@@ -21,7 +19,6 @@ pub type RoomId = u32;
 // ============================================================================
 
 /// Player connection status
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum PlayerStatus {
     /// Player is offline
@@ -35,7 +32,6 @@ pub enum PlayerStatus {
 }
 
 /// Game event types
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GameEvent {
     /// Player joined the game
     PlayerJoined {
@@ -66,16 +62,14 @@ pub enum GameEvent {
 // ============================================================================
 
 /// 2D position in the game world
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Position {
     /// X coordinate
     pub x: f32,
-    /// Y coordinate  
+    /// Y coordinate
     pub y: f32,
 }
 
 /// 2D velocity vector
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Velocity {
     /// X component
     pub dx: f32,
@@ -84,7 +78,6 @@ pub struct Velocity {
 }
 
 /// Player information
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Player {
     /// Unique player ID
     pub id: PlayerId,
@@ -105,7 +98,6 @@ pub struct Player {
 }
 
 /// Game room configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomConfig {
     /// Room ID
     pub id: RoomId,
@@ -122,7 +114,6 @@ pub struct RoomConfig {
 }
 
 /// Complete game state snapshot
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     /// Tick number
     pub tick: u64,
@@ -141,7 +132,6 @@ pub struct GameState {
 // ============================================================================
 
 /// Client-to-server messages
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
     /// Join a room
     JoinRoom {
@@ -161,7 +151,6 @@ pub enum ClientMessage {
 }
 
 /// Server-to-client messages
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMessage {
     /// Welcome message after connection
     Welcome {
@@ -188,7 +177,6 @@ pub enum ServerMessage {
 }
 
 /// Partial player update for delta sync
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerUpdate {
     /// Player ID
     pub id: PlayerId,
@@ -207,7 +195,6 @@ pub struct PlayerUpdate {
 // ============================================================================
 
 /// Paginated response wrapper
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paginated<T> {
     /// Items in this page
     pub items: Vec<T>,
@@ -220,7 +207,6 @@ pub struct Paginated<T> {
 }
 
 /// Result wrapper for API responses
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiResult<T> {
     /// Success flag
     pub success: bool,

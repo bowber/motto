@@ -144,6 +144,12 @@ fn generate_types(manifest: &SchemaManifest) -> Result<GeneratedFile> {
 
     content.push_str("\n// Type Definitions\n\n");
 
+    // Generate type aliases first (they're often used by other types)
+    for alias in &manifest.type_aliases {
+        content.push_str(&generate_type_alias(&alias));
+        content.push('\n');
+    }
+
     // Generate enums
     for e in &manifest.enums {
         content.push_str(&generate_enum_type(e));
@@ -156,10 +162,30 @@ fn generate_types(manifest: &SchemaManifest) -> Result<GeneratedFile> {
         content.push('\n');
     }
 
+    // Generate implicit router type
+    if let Some(router) = &manifest.router {
+        content.push_str(&generate_router_type(router));
+        content.push('\n');
+    }
+
     Ok(GeneratedFile {
         path: PathBuf::from("src/types.ts"),
         content,
     })
+}
+
+/// Generate a type alias declaration
+fn generate_type_alias(alias: &TypeAliasManifest) -> String {
+    let mut s = String::new();
+
+    if let Some(docs) = &alias.docs {
+        s.push_str(&format!("/** {} */\n", docs));
+    }
+
+    let ts_type = rust_to_ts_type(&alias.target);
+    s.push_str(&format!("export type {} = {};\n", alias.name, ts_type));
+
+    s
 }
 
 fn generate_enum_type(e: &EnumManifest) -> String {
@@ -252,6 +278,50 @@ fn generate_message_interface(msg: &MessageDef) -> String {
     }
 
     s.push_str("}\n");
+    s
+}
+
+/// Generate the implicit router type
+fn generate_router_type(router: &RouterManifest) -> String {
+    let mut s = String::new();
+
+    // Add docs
+    if let Some(docs) = &router.docs {
+        for line in docs.lines() {
+            s.push_str(&format!(" * {}\n", line));
+        }
+        s.insert_str(0, "/**\n");
+        s.push_str(" */\n");
+    }
+
+    // Generate discriminated union type
+    s.push_str(&format!("export type {} =\n", router.name));
+
+    for (i, variant) in router.variants.iter().enumerate() {
+        s.push_str(&format!(
+            "  | {{ type: '{}'; data: {} }}",
+            variant.name, variant.message_type
+        ));
+        if i < router.variants.len() - 1 {
+            s.push('\n');
+        }
+    }
+    s.push_str(";\n\n");
+
+    // Generate discriminant constants for binary routing
+    s.push_str(&format!(
+        "/** Message type discriminants for {} */\n",
+        router.name
+    ));
+    s.push_str(&format!("export const {}Type = {{\n", router.name));
+    for variant in &router.variants {
+        s.push_str(&format!(
+            "  {}: {} as const,\n",
+            variant.name, variant.discriminant
+        ));
+    }
+    s.push_str("} as const;\n");
+
     s
 }
 
@@ -462,6 +532,16 @@ export class PacketBuilder {
 "#,
     );
 
+    // Generate encode/decode functions for type aliases
+    for alias in &manifest.type_aliases {
+        content.push_str(&generate_type_alias_codec(alias));
+    }
+
+    // Generate encode/decode functions for each enum
+    for e in &manifest.enums {
+        content.push_str(&generate_enum_codec(e));
+    }
+
     // Generate encode/decode functions for each message
     for msg in &manifest.messages {
         content.push_str(&generate_message_codec(msg));
@@ -473,18 +553,177 @@ export class PacketBuilder {
     })
 }
 
+/// Generate codec functions for type aliases
+fn generate_type_alias_codec(alias: &TypeAliasManifest) -> String {
+    let mut s = String::new();
+    let name = &alias.name;
+    let target = &alias.target;
+
+    // Helper encode - just delegate to the underlying type
+    s.push_str(&format!(
+        "\n/** Encode {} (alias for {}) */\nfunction encode{}Fields(val: Types.{}, builder: PacketBuilder): void {{\n",
+        name, target, name, name
+    ));
+    s.push_str(&format!("  {};\n", encode_field("val", target)));
+    s.push_str("}\n");
+
+    // Helper decode
+    s.push_str(&format!(
+        "\n/** Decode {} (alias for {}) */\nfunction decode{}Fields(view: PacketView): Types.{} {{\n",
+        name, target, name, name
+    ));
+    s.push_str(&format!(
+        "  return {} as Types.{};\n",
+        decode_field(target),
+        name
+    ));
+    s.push_str("}\n");
+
+    s
+}
+
+/// Generate codec functions for enums
+fn generate_enum_codec(e: &EnumManifest) -> String {
+    let mut s = String::new();
+    let name = &e.name;
+
+    if e.is_simple {
+        // Simple C-style enum: just encode/decode as the repr type
+        let write_fn = match e.repr.as_str() {
+            "u8" | "i8" => "writeU8",
+            "u16" | "i16" => "writeU16",
+            "u32" | "i32" => "writeU32",
+            _ => "writeU8",
+        };
+        let read_fn = match e.repr.as_str() {
+            "u8" | "i8" => "readU8",
+            "u16" | "i16" => "readU16",
+            "u32" | "i32" => "readU32",
+            _ => "readU8",
+        };
+
+        // Helper encode
+        s.push_str(&format!(
+            "\n/** Encode {} enum (for nested types) */\nfunction encode{}Fields(val: Types.{}, builder: PacketBuilder): void {{\n",
+            name, name, name
+        ));
+        s.push_str(&format!("  builder.{}(val);\n", write_fn));
+        s.push_str("}\n");
+
+        // Helper decode
+        s.push_str(&format!(
+            "\n/** Decode {} enum (for nested types) */\nfunction decode{}Fields(view: PacketView): Types.{} {{\n",
+            name, name, name
+        ));
+        s.push_str(&format!("  return view.{}() as Types.{};\n", read_fn, name));
+        s.push_str("}\n");
+    } else {
+        // Tagged union: encode discriminant + variant data
+        s.push_str(&format!(
+            "\n/** Encode {} union (for nested types) */\nfunction encode{}Fields(val: Types.{}, builder: PacketBuilder): void {{\n",
+            name, name, name
+        ));
+        s.push_str("  switch (val.type) {\n");
+
+        for v in &e.variants {
+            s.push_str(&format!("    case '{}':\n", v.name));
+            s.push_str(&format!("      builder.writeU8({});\n", v.discriminant));
+
+            match &v.data {
+                VariantData::Unit => {}
+                VariantData::Tuple { types } => {
+                    for (i, t) in types.iter().enumerate() {
+                        s.push_str(&format!(
+                            "      {};\n",
+                            encode_field(&format!("val._{}", i), t)
+                        ));
+                    }
+                }
+                VariantData::Struct { fields } => {
+                    for f in fields {
+                        let field_name = utils::escape_reserved(&f.name, TS_RESERVED);
+                        s.push_str(&format!(
+                            "      {};\n",
+                            encode_field(&format!("val.{}", field_name), &f.type_ref)
+                        ));
+                    }
+                }
+            }
+            s.push_str("      break;\n");
+        }
+
+        s.push_str("  }\n}\n");
+
+        // Helper decode
+        s.push_str(&format!(
+            "\n/** Decode {} union (for nested types) */\nfunction decode{}Fields(view: PacketView): Types.{} {{\n",
+            name, name, name
+        ));
+        s.push_str("  const tag = view.readU8();\n");
+        s.push_str("  switch (tag) {\n");
+
+        for v in &e.variants {
+            s.push_str(&format!("    case {}:\n", v.discriminant));
+
+            match &v.data {
+                VariantData::Unit => {
+                    s.push_str(&format!(
+                        "      return {{ type: '{}' }} as Types.{};\n",
+                        v.name, name
+                    ));
+                }
+                VariantData::Tuple { types } => {
+                    let fields: Vec<String> = types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| format!("_{}: {}", i, decode_field(t)))
+                        .collect();
+                    s.push_str(&format!(
+                        "      return {{ type: '{}', {} }} as Types.{};\n",
+                        v.name,
+                        fields.join(", "),
+                        name
+                    ));
+                }
+                VariantData::Struct { fields } => {
+                    let field_strs: Vec<String> = fields
+                        .iter()
+                        .map(|f| {
+                            let field_name = utils::escape_reserved(&f.name, TS_RESERVED);
+                            format!("{}: {}", field_name, decode_field(&f.type_ref))
+                        })
+                        .collect();
+                    s.push_str(&format!(
+                        "      return {{ type: '{}', {} }} as Types.{};\n",
+                        v.name,
+                        field_strs.join(", "),
+                        name
+                    ));
+                }
+            }
+        }
+
+        s.push_str(&format!(
+            "    default:\n      throw new Error(`Unknown {} tag: ${{tag}}`);\n",
+            name
+        ));
+        s.push_str("  }\n}\n");
+    }
+
+    s
+}
+
 fn generate_message_codec(msg: &MessageDef) -> String {
     let mut s = String::new();
 
     let name = &msg.name;
     let _camel_name = utils::to_camel_case(name);
 
-    // Encode function
+    // Helper encode function (takes builder as parameter, for nested encoding)
     s.push_str(&format!(
-        "\n/** Encode {} to binary */\nexport function encode{}(msg: Types.{}): Uint8Array {{\n",
+        "\n/** Encode {} fields to a PacketBuilder (for nested types) */\nfunction encode{}Fields(msg: Types.{}, builder: PacketBuilder): void {{\n",
         name, name, name
     ));
-    s.push_str("  const builder = new PacketBuilder();\n");
 
     for field in &msg.fields {
         let field_name = utils::escape_reserved(&field.name, TS_RESERVED);
@@ -507,17 +746,22 @@ fn generate_message_codec(msg: &MessageDef) -> String {
             ));
         }
     }
+    s.push_str("}\n");
 
-    s.push_str("  return builder.build();\n}\n");
-
-    // Decode function
+    // Main encode function (creates PacketBuilder, returns Uint8Array)
     s.push_str(&format!(
-        "\n/** Decode {} from binary */\nexport function decode{}(data: Uint8Array): Types.{} {{\n",
+        "\n/** Encode {} to binary */\nexport function encode{}(msg: Types.{}): Uint8Array {{\n",
         name, name, name
     ));
-    s.push_str("  const view = new PacketView(data);\n");
-    s.push_str("  // Skip version byte\n");
-    s.push_str("  view.skip(1);\n\n");
+    s.push_str("  const builder = new PacketBuilder();\n");
+    s.push_str(&format!("  encode{}Fields(msg, builder);\n", name));
+    s.push_str("  return builder.build();\n}\n");
+
+    // Helper decode function (takes view as parameter, for nested decoding)
+    s.push_str(&format!(
+        "\n/** Decode {} fields from a PacketView (for nested types) */\nfunction decode{}Fields(view: PacketView): Types.{} {{\n",
+        name, name, name
+    ));
     s.push_str("  return {\n");
 
     for field in &msg.fields {
@@ -540,10 +784,52 @@ fn generate_message_codec(msg: &MessageDef) -> String {
 
     s.push_str("  };\n}\n");
 
+    // Main decode function (creates PacketView, skips version byte)
+    s.push_str(&format!(
+        "\n/** Decode {} from binary */\nexport function decode{}(data: Uint8Array): Types.{} {{\n",
+        name, name, name
+    ));
+    s.push_str("  const view = new PacketView(data);\n");
+    s.push_str("  // Skip version byte\n");
+    s.push_str("  view.skip(1);\n");
+    s.push_str(&format!("  return decode{}Fields(view);\n", name));
+    s.push_str("}\n");
+
     s
 }
 
 fn encode_field(accessor: &str, type_ref: &str) -> String {
+    // Handle generic types
+    if let Some((name, inner)) = parse_generic_type(type_ref) {
+        match name {
+            "Vec" => {
+                // Array: write length, then each element
+                return format!(
+                    "{{ builder.writeU32({accessor}.length); for (const item of {accessor}) {{ {encode}; }} }}",
+                    accessor = accessor,
+                    encode = encode_field("item", inner)
+                );
+            }
+            "Option" => {
+                // Optional: presence byte + value (should be handled at call site)
+                return encode_field(accessor, inner);
+            }
+            "HashMap" | "BTreeMap" => {
+                let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+                if parts.len() == 2 {
+                    return format!(
+                        "{{ builder.writeU32({accessor}.size); for (const [k, v] of {accessor}) {{ {key_encode}; {val_encode}; }} }}",
+                        accessor = accessor,
+                        key_encode = encode_field("k", parts[0]),
+                        val_encode = encode_field("v", parts[1])
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Handle primitives
     match type_ref {
         "u8" => format!("builder.writeU8({})", accessor),
         "u16" => format!("builder.writeU16({})", accessor),
@@ -557,11 +843,46 @@ fn encode_field(accessor: &str, type_ref: &str) -> String {
         "f64" => format!("builder.writeF64({})", accessor),
         "bool" => format!("builder.writeBool({})", accessor),
         "String" | "str" => format!("builder.writeString({})", accessor),
-        _ => format!("/* TODO: encode {} */", type_ref),
+        _ => {
+            // Custom type - call the encode fields helper function
+            format!("encode{}Fields({}, builder)", type_ref, accessor)
+        }
     }
 }
 
 fn decode_field(type_ref: &str) -> String {
+    // Handle generic types
+    if let Some((name, inner)) = parse_generic_type(type_ref) {
+        match name {
+            "Vec" => {
+                // Array: read length, then each element
+                return format!(
+                    "(() => {{ const len = view.readU32(); const arr: {}[] = []; for (let i = 0; i < len; i++) {{ arr.push({}); }} return arr; }})()",
+                    rust_to_ts_type(inner),
+                    decode_field(inner)
+                );
+            }
+            "Option" => {
+                // Optional: presence already read at call site
+                return decode_field(inner);
+            }
+            "HashMap" | "BTreeMap" => {
+                let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+                if parts.len() == 2 {
+                    return format!(
+                        "(() => {{ const len = view.readU32(); const map = new Map<{}, {}>(); for (let i = 0; i < len; i++) {{ map.set({}, {}); }} return map; }})()",
+                        rust_to_ts_type(parts[0]),
+                        rust_to_ts_type(parts[1]),
+                        decode_field(parts[0]),
+                        decode_field(parts[1])
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Handle primitives
     match type_ref {
         "u8" => "view.readU8()".to_string(),
         "u16" => "view.readU16()".to_string(),
@@ -575,7 +896,21 @@ fn decode_field(type_ref: &str) -> String {
         "f64" => "view.readF64()".to_string(),
         "bool" => "view.readBool()".to_string(),
         "String" | "str" => "view.readString()".to_string(),
-        _ => format!("undefined /* TODO: decode {} */", type_ref),
+        _ => {
+            // Custom type - call the decode fields helper function
+            format!("decode{}Fields(view)", type_ref)
+        }
+    }
+}
+
+/// Parse a generic type like "Vec<T>" into ("Vec", "T")
+fn parse_generic_type(type_ref: &str) -> Option<(&str, &str)> {
+    if let Some(inner_start) = type_ref.find('<') {
+        let name = &type_ref[..inner_start];
+        let inner = &type_ref[inner_start + 1..type_ref.len() - 1];
+        Some((name, inner))
+    } else {
+        None
     }
 }
 
