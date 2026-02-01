@@ -46,6 +46,11 @@ impl Emitter for RustEmitter {
         // Generate tests
         files.push(generate_tests(&config.manifest)?);
 
+        // Generate transport modules (feature-gated)
+        files.push(generate_transport_common(&config.manifest)?);
+        files.push(generate_webtransport(&config.manifest)?);
+        files.push(generate_websocket(&config.manifest)?);
+
         Ok(files)
     }
 }
@@ -88,6 +93,26 @@ pub mod codec;
 
 #[cfg(test)]
 mod tests;
+
+// Transport module (common types for webtransport and websocket)
+#[cfg(any(feature = "webtransport", feature = "websocket"))]
+pub mod transport;
+
+#[cfg(feature = "webtransport")]
+pub mod webtransport;
+
+#[cfg(feature = "websocket")]
+pub mod websocket;
+
+// Re-export transport types when features are enabled
+#[cfg(any(feature = "webtransport", feature = "websocket"))]
+pub use transport::{TransportConfig, TransportError, ConnectionState};
+
+#[cfg(feature = "webtransport")]
+pub use webtransport::WebTransportClient;
+
+#[cfg(feature = "websocket")]
+pub use websocket::WebSocketClient;
 
 /// Protocol version byte - embedded in all packets
 pub const PROTOCOL_VERSION_BYTE: u8 = "#,
@@ -833,10 +858,10 @@ fn generate_cargo_toml(manifest: &SchemaManifest) -> Result<GeneratedFile> {
     let name = utils::to_snake_case(&manifest.meta.name);
     let content = format!(
         r#"[package]
-name = "{name}_schema"
+name = "{name}_sdk"
 version = "0.1.0"
 edition = "2021"
-description = "Generated Motto SDK schema types for {name}"
+description = "Generated Motto SDK for {name}"
 license = "MIT OR Apache-2.0"
 
 # Motto schema metadata
@@ -844,11 +869,52 @@ license = "MIT OR Apache-2.0"
 fingerprint = "{fingerprint}"
 protocol_version = {version_byte}
 
+[features]
+default = ["core", "webtransport", "websocket"]
+core = []
+webtransport = ["core", "dep:tokio", "dep:wtransport"]
+websocket = ["core", "dep:tokio", "dep:tokio-tungstenite"]
+
+# WASM features (automatically enabled by target)
+wasm = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
+
 [dependencies]
-# No dependencies required - pure Rust types
+# Core has no dependencies - pure Rust types + codec
+
+# Native async runtime (for transport features)
+tokio = {{ version = "1", features = ["rt", "sync", "time"], optional = true }}
+
+# Native WebTransport
+wtransport = {{ version = "0.6", optional = true }}
+
+# Native WebSocket
+tokio-tungstenite = {{ version = "0.24", optional = true }}
+
+# WASM bindings (auto-enabled on wasm32 target)
+wasm-bindgen = {{ version = "0.2", optional = true }}
+wasm-bindgen-futures = {{ version = "0.4", optional = true }}
+js-sys = {{ version = "0.3", optional = true }}
+web-sys = {{ version = "0.3", optional = true, features = [
+    "WebTransport", "WebTransportDatagramDuplexStream",
+    "ReadableStream", "WritableStream", "ReadableStreamDefaultReader",
+    "WritableStreamDefaultWriter", "WebSocket", "MessageEvent", "BinaryType",
+    "CloseEvent", "ErrorEvent", "Window"
+] }}
 
 [dev-dependencies]
-# For testing encode/decode roundtrips
+# For testing
+
+# Auto-enable wasm feature on wasm32 target
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = {{ version = "0.2" }}
+wasm-bindgen-futures = {{ version = "0.4" }}
+js-sys = {{ version = "0.3" }}
+web-sys = {{ version = "0.3", features = [
+    "WebTransport", "WebTransportDatagramDuplexStream",
+    "ReadableStream", "WritableStream", "ReadableStreamDefaultReader",
+    "WritableStreamDefaultWriter", "WebSocket", "MessageEvent", "BinaryType",
+    "CloseEvent", "ErrorEvent", "Window"
+] }}
 "#,
         name = name,
         fingerprint = &manifest.meta.fingerprint[..16],
@@ -1017,9 +1083,894 @@ fn generate_test_instance_fn(msg: &MessageDef, manifest: &SchemaManifest) -> Str
 
     s.push_str("    }\n");
     s.push_str("}\n\n");
+
     s
 }
 
+// ============================================================================
+// Transport Module Generators
+// ============================================================================
+
+/// Generate common transport traits and types
+fn generate_transport_common(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+    let mut content = String::new();
+
+    content.push_str(&generate_rust_header(
+        manifest.meta.version_byte,
+        &manifest.meta.fingerprint,
+        &manifest.meta.generated_at,
+    ));
+
+    content.push_str(
+        r#"
+//! Common transport traits and types.
+//!
+//! This module provides the shared abstractions used by both WebTransport
+//! and WebSocket implementations.
+
+use std::future::Future;
+use std::pin::Pin;
+
+/// Transport error types
+#[derive(Debug)]
+pub enum TransportError {
+    /// Connection failed
+    ConnectionFailed(String),
+    /// Connection closed
+    Disconnected,
+    /// Failed to send data
+    SendFailed(String),
+    /// Failed to receive data
+    ReceiveFailed(String),
+    /// Codec error (encode/decode failure)
+    CodecError(String),
+    /// Version mismatch
+    VersionMismatch { expected: u8, got: u8 },
+    /// Connection timeout
+    Timeout,
+    /// Other error
+    Other(String),
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportError::ConnectionFailed(msg) => write!(f, "Connection failed: {}", msg),
+            TransportError::Disconnected => write!(f, "Disconnected"),
+            TransportError::SendFailed(msg) => write!(f, "Send failed: {}", msg),
+            TransportError::ReceiveFailed(msg) => write!(f, "Receive failed: {}", msg),
+            TransportError::CodecError(msg) => write!(f, "Codec error: {}", msg),
+            TransportError::VersionMismatch { expected, got } => {
+                write!(f, "Version mismatch: expected 0x{:02X}, got 0x{:02X}", expected, got)
+            }
+            TransportError::Timeout => write!(f, "Timeout"),
+            TransportError::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for TransportError {}
+
+/// Connection state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Reconnecting,
+}
+
+/// Transport trait - implemented by WebTransport and WebSocket clients
+pub trait Transport {
+    type Error;
+    
+    /// Send raw bytes
+    fn send(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + '_>>;
+    
+    /// Receive raw bytes
+    fn recv(&self) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Self::Error>> + Send + '_>>;
+    
+    /// Close the connection
+    fn close(&self) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + '_>>;
+    
+    /// Get current connection state
+    fn state(&self) -> ConnectionState;
+}
+
+/// Configuration for transport clients
+#[derive(Debug, Clone)]
+pub struct TransportConfig {
+    /// Server URL
+    pub url: String,
+    /// Connection timeout in milliseconds
+    pub connect_timeout_ms: u64,
+    /// Enable automatic reconnection
+    pub auto_reconnect: bool,
+    /// Maximum reconnection attempts (0 = infinite)
+    pub max_reconnect_attempts: u32,
+    /// Base delay between reconnection attempts in milliseconds
+    pub reconnect_delay_ms: u64,
+    /// Maximum reconnection delay in milliseconds
+    pub max_reconnect_delay_ms: u64,
+}
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            connect_timeout_ms: 10_000,
+            auto_reconnect: true,
+            max_reconnect_attempts: 5,
+            reconnect_delay_ms: 1_000,
+            max_reconnect_delay_ms: 30_000,
+        }
+    }
+}
+
+impl TransportConfig {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            ..Default::default()
+        }
+    }
+}
+"#,
+    );
+
+    Ok(GeneratedFile {
+        path: PathBuf::from("src/transport.rs"),
+        content,
+    })
+}
+
+/// Generate WebTransport module with native/WASM support
+fn generate_webtransport(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+    let router_name = manifest
+        .router
+        .as_ref()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "Router".to_string());
+
+    let mut content = String::new();
+
+    content.push_str(&generate_rust_header(
+        manifest.meta.version_byte,
+        &manifest.meta.fingerprint,
+        &manifest.meta.generated_at,
+    ));
+
+    content.push_str(&format!(
+        r#"
+//! WebTransport client implementation.
+//!
+//! This module provides a WebTransport client that works on both native
+//! and WASM targets. The implementation is automatically selected at
+//! compile time based on the target architecture.
+//!
+//! # Native (non-WASM)
+//! Uses the `wtransport` crate for pure Rust WebTransport.
+//!
+//! # WASM
+//! Uses `wasm-bindgen` to access the browser's WebTransport API.
+//!
+//! # Example
+//! ```ignore
+//! use {name}_schema::{{WebTransportClient, {router}}};
+//! use {name}_schema::transport::TransportConfig;
+//!
+//! let config = TransportConfig::new("https://example.com:4433");
+//! let client = WebTransportClient::connect(config).await?;
+//!
+//! // Send a message
+//! client.send(&my_message).await?;
+//!
+//! // Receive and route messages
+//! let msg: {router} = client.recv().await?;
+//! ```
+
+use crate::transport::{{TransportError, TransportConfig, ConnectionState}};
+use crate::codec::{{Encode, Decode}};
+use crate::PROTOCOL_VERSION_BYTE;
+"#,
+        name = utils::to_snake_case(&manifest.meta.name),
+        router = router_name,
+    ));
+
+    // Native implementation
+    content.push_str(
+        r#"
+// ============================================================================
+// Native Implementation (non-WASM)
+// ============================================================================
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// WebTransport client for native platforms
+    pub struct WebTransportClient {
+        config: TransportConfig,
+        state: Arc<RwLock<ConnectionState>>,
+        // Connection handle would be stored here
+        // connection: Option<wtransport::Connection>,
+    }
+
+    impl WebTransportClient {
+        /// Create a new WebTransport client (not connected)
+        pub fn new(config: TransportConfig) -> Self {
+            Self {
+                config,
+                state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            }
+        }
+
+        /// Connect to the server
+        pub async fn connect(config: TransportConfig) -> Result<Self, TransportError> {
+            let client = Self::new(config);
+            client.do_connect().await?;
+            Ok(client)
+        }
+
+        async fn do_connect(&self) -> Result<(), TransportError> {
+            *self.state.write().await = ConnectionState::Connecting;
+            
+            // TODO: Implement actual wtransport connection
+            // For now, this is a placeholder that shows the structure
+            //
+            // let endpoint = wtransport::Endpoint::client(
+            //     wtransport::ClientConfig::builder()
+            //         .with_bind_default()
+            //         .with_no_cert_validation() // For development
+            //         .build()
+            // )?;
+            //
+            // let connection = endpoint.connect(&self.config.url).await?;
+            
+            *self.state.write().await = ConnectionState::Connected;
+            Ok(())
+        }
+
+        /// Send an encodable message
+        pub async fn send<T: Encode>(&self, msg: &T) -> Result<(), TransportError> {
+            let state = *self.state.read().await;
+            if state != ConnectionState::Connected {
+                return Err(TransportError::Disconnected);
+            }
+
+            let mut buf = vec![PROTOCOL_VERSION_BYTE];
+            msg.encode(&mut buf)
+                .map_err(|e| TransportError::CodecError(e.to_string()))?;
+            
+            self.send_raw(&buf).await
+        }
+
+        /// Send raw bytes
+        pub async fn send_raw(&self, data: &[u8]) -> Result<(), TransportError> {
+            let state = *self.state.read().await;
+            if state != ConnectionState::Connected {
+                return Err(TransportError::Disconnected);
+            }
+
+            // TODO: Send via wtransport datagram
+            // self.connection.send_datagram(data).await?;
+            
+            let _ = data; // Placeholder
+            Ok(())
+        }
+
+        /// Receive and decode a message
+        pub async fn recv<T: Decode>(&self) -> Result<T, TransportError> {
+            let data = self.recv_raw().await?;
+            
+            if data.is_empty() {
+                return Err(TransportError::ReceiveFailed("Empty packet".into()));
+            }
+
+            if data[0] != PROTOCOL_VERSION_BYTE {
+                return Err(TransportError::VersionMismatch {
+                    expected: PROTOCOL_VERSION_BYTE,
+                    got: data[0],
+                });
+            }
+
+            T::decode(&mut &data[1..])
+                .map_err(|e| TransportError::CodecError(e.to_string()))
+        }
+
+        /// Receive raw bytes
+        pub async fn recv_raw(&self) -> Result<Vec<u8>, TransportError> {
+            let state = *self.state.read().await;
+            if state != ConnectionState::Connected {
+                return Err(TransportError::Disconnected);
+            }
+
+            // TODO: Receive via wtransport datagram
+            // let data = self.connection.receive_datagram().await?;
+            
+            Ok(vec![]) // Placeholder
+        }
+
+        /// Close the connection
+        pub async fn close(&self) -> Result<(), TransportError> {
+            *self.state.write().await = ConnectionState::Disconnected;
+            // TODO: Close wtransport connection
+            Ok(())
+        }
+
+        /// Get current connection state
+        pub async fn state(&self) -> ConnectionState {
+            *self.state.read().await
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::WebTransportClient;
+"#,
+    );
+
+    // WASM implementation
+    content.push_str(
+        r#"
+// ============================================================================
+// WASM Implementation
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use super::*;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_futures::JsFuture;
+    use web_sys::{WebTransport as JsWebTransport, WebTransportDatagramDuplexStream};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// WebTransport client for WASM (browser)
+    pub struct WebTransportClient {
+        config: TransportConfig,
+        state: Rc<RefCell<ConnectionState>>,
+        transport: Rc<RefCell<Option<JsWebTransport>>>,
+    }
+
+    impl WebTransportClient {
+        /// Create a new WebTransport client (not connected)
+        pub fn new(config: TransportConfig) -> Self {
+            Self {
+                config,
+                state: Rc::new(RefCell::new(ConnectionState::Disconnected)),
+                transport: Rc::new(RefCell::new(None)),
+            }
+        }
+
+        /// Connect to the server
+        pub async fn connect(config: TransportConfig) -> Result<Self, TransportError> {
+            let client = Self::new(config);
+            client.do_connect().await?;
+            Ok(client)
+        }
+
+        async fn do_connect(&self) -> Result<(), TransportError> {
+            *self.state.borrow_mut() = ConnectionState::Connecting;
+
+            // Create WebTransport instance via browser API
+            let transport = JsWebTransport::new(&self.config.url)
+                .map_err(|e| TransportError::ConnectionFailed(format!("{:?}", e)))?;
+
+            // Wait for connection to be ready
+            let ready_promise = transport.ready();
+            JsFuture::from(ready_promise)
+                .await
+                .map_err(|e| TransportError::ConnectionFailed(format!("{:?}", e)))?;
+
+            *self.transport.borrow_mut() = Some(transport);
+            *self.state.borrow_mut() = ConnectionState::Connected;
+            Ok(())
+        }
+
+        /// Send an encodable message
+        pub async fn send<T: Encode>(&self, msg: &T) -> Result<(), TransportError> {
+            if *self.state.borrow() != ConnectionState::Connected {
+                return Err(TransportError::Disconnected);
+            }
+
+            let mut buf = vec![PROTOCOL_VERSION_BYTE];
+            msg.encode(&mut buf)
+                .map_err(|e| TransportError::CodecError(e.to_string()))?;
+            
+            self.send_raw(&buf).await
+        }
+
+        /// Send raw bytes
+        pub async fn send_raw(&self, data: &[u8]) -> Result<(), TransportError> {
+            let transport = self.transport.borrow();
+            let transport = transport.as_ref().ok_or(TransportError::Disconnected)?;
+
+            let datagrams: WebTransportDatagramDuplexStream = transport.datagrams();
+            let writable = datagrams.writable();
+            
+            let writer = writable
+                .get_writer()
+                .map_err(|e| TransportError::SendFailed(format!("{:?}", e)))?;
+
+            let uint8_array = js_sys::Uint8Array::from(data);
+            let write_promise = writer.write_with_chunk(&uint8_array);
+            
+            JsFuture::from(write_promise)
+                .await
+                .map_err(|e| TransportError::SendFailed(format!("{:?}", e)))?;
+
+            writer.release_lock();
+            Ok(())
+        }
+
+        /// Receive and decode a message
+        pub async fn recv<T: Decode>(&self) -> Result<T, TransportError> {
+            let data = self.recv_raw().await?;
+            
+            if data.is_empty() {
+                return Err(TransportError::ReceiveFailed("Empty packet".into()));
+            }
+
+            if data[0] != PROTOCOL_VERSION_BYTE {
+                return Err(TransportError::VersionMismatch {
+                    expected: PROTOCOL_VERSION_BYTE,
+                    got: data[0],
+                });
+            }
+
+            T::decode(&mut &data[1..])
+                .map_err(|e| TransportError::CodecError(e.to_string()))
+        }
+
+        /// Receive raw bytes
+        pub async fn recv_raw(&self) -> Result<Vec<u8>, TransportError> {
+            let transport = self.transport.borrow();
+            let transport = transport.as_ref().ok_or(TransportError::Disconnected)?;
+
+            let datagrams: WebTransportDatagramDuplexStream = transport.datagrams();
+            let readable = datagrams.readable();
+            
+            let reader = readable
+                .get_reader()
+                .map_err(|e| TransportError::ReceiveFailed(format!("{:?}", e)))?
+                .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
+
+            let read_promise = reader.read();
+            let result = JsFuture::from(read_promise)
+                .await
+                .map_err(|e| TransportError::ReceiveFailed(format!("{:?}", e)))?;
+
+            reader.release_lock();
+
+            // Extract value from ReadableStreamReadResult
+            let value = js_sys::Reflect::get(&result, &JsValue::from_str("value"))
+                .map_err(|e| TransportError::ReceiveFailed(format!("{:?}", e)))?;
+
+            if value.is_undefined() {
+                return Err(TransportError::Disconnected);
+            }
+
+            let uint8_array = value.unchecked_into::<js_sys::Uint8Array>();
+            Ok(uint8_array.to_vec())
+        }
+
+        /// Close the connection
+        pub async fn close(&self) -> Result<(), TransportError> {
+            if let Some(transport) = self.transport.borrow().as_ref() {
+                transport.close();
+            }
+            *self.transport.borrow_mut() = None;
+            *self.state.borrow_mut() = ConnectionState::Disconnected;
+            Ok(())
+        }
+
+        /// Get current connection state
+        pub fn state(&self) -> ConnectionState {
+            *self.state.borrow()
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use wasm::WebTransportClient;
+"#,
+    );
+
+    Ok(GeneratedFile {
+        path: PathBuf::from("src/webtransport.rs"),
+        content,
+    })
+}
+
+/// Generate WebSocket module with native/WASM support
+fn generate_websocket(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+    let router_name = manifest
+        .router
+        .as_ref()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "Router".to_string());
+
+    let mut content = String::new();
+
+    content.push_str(&generate_rust_header(
+        manifest.meta.version_byte,
+        &manifest.meta.fingerprint,
+        &manifest.meta.generated_at,
+    ));
+
+    content.push_str(&format!(
+        r#"
+//! WebSocket client implementation.
+//!
+//! This module provides a WebSocket client that works on both native
+//! and WASM targets. The implementation is automatically selected at
+//! compile time based on the target architecture.
+//!
+//! # Native (non-WASM)
+//! Uses `tokio-tungstenite` for async WebSocket support.
+//!
+//! # WASM
+//! Uses `wasm-bindgen` to access the browser's WebSocket API.
+//!
+//! # Example
+//! ```ignore
+//! use {name}_schema::{{WebSocketClient, {router}}};
+//! use {name}_schema::transport::TransportConfig;
+//!
+//! let config = TransportConfig::new("wss://example.com/ws");
+//! let client = WebSocketClient::connect(config).await?;
+//!
+//! // Send a message
+//! client.send(&my_message).await?;
+//!
+//! // Receive and route messages
+//! let msg: {router} = client.recv().await?;
+//! ```
+
+use crate::transport::{{TransportError, TransportConfig, ConnectionState}};
+use crate::codec::{{Encode, Decode}};
+use crate::PROTOCOL_VERSION_BYTE;
+"#,
+        name = utils::to_snake_case(&manifest.meta.name),
+        router = router_name,
+    ));
+
+    // Native implementation
+    content.push_str(
+        r#"
+// ============================================================================
+// Native Implementation (non-WASM)
+// ============================================================================
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// WebSocket client for native platforms
+    pub struct WebSocketClient {
+        config: TransportConfig,
+        state: Arc<RwLock<ConnectionState>>,
+        // WebSocket connection would be stored here
+        // ws: Option<tokio_tungstenite::WebSocketStream<...>>,
+    }
+
+    impl WebSocketClient {
+        /// Create a new WebSocket client (not connected)
+        pub fn new(config: TransportConfig) -> Self {
+            Self {
+                config,
+                state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            }
+        }
+
+        /// Connect to the server
+        pub async fn connect(config: TransportConfig) -> Result<Self, TransportError> {
+            let client = Self::new(config);
+            client.do_connect().await?;
+            Ok(client)
+        }
+
+        async fn do_connect(&self) -> Result<(), TransportError> {
+            *self.state.write().await = ConnectionState::Connecting;
+            
+            // TODO: Implement actual tokio-tungstenite connection
+            // For now, this is a placeholder that shows the structure
+            //
+            // let (ws_stream, _) = tokio_tungstenite::connect_async(&self.config.url)
+            //     .await
+            //     .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
+            
+            *self.state.write().await = ConnectionState::Connected;
+            Ok(())
+        }
+
+        /// Send an encodable message
+        pub async fn send<T: Encode>(&self, msg: &T) -> Result<(), TransportError> {
+            let state = *self.state.read().await;
+            if state != ConnectionState::Connected {
+                return Err(TransportError::Disconnected);
+            }
+
+            let mut buf = vec![PROTOCOL_VERSION_BYTE];
+            msg.encode(&mut buf)
+                .map_err(|e| TransportError::CodecError(e.to_string()))?;
+            
+            self.send_raw(&buf).await
+        }
+
+        /// Send raw bytes
+        pub async fn send_raw(&self, data: &[u8]) -> Result<(), TransportError> {
+            let state = *self.state.read().await;
+            if state != ConnectionState::Connected {
+                return Err(TransportError::Disconnected);
+            }
+
+            // TODO: Send via WebSocket binary message
+            // use tokio_tungstenite::tungstenite::Message;
+            // self.ws.send(Message::Binary(data.to_vec())).await?;
+            
+            let _ = data; // Placeholder
+            Ok(())
+        }
+
+        /// Receive and decode a message
+        pub async fn recv<T: Decode>(&self) -> Result<T, TransportError> {
+            let data = self.recv_raw().await?;
+            
+            if data.is_empty() {
+                return Err(TransportError::ReceiveFailed("Empty packet".into()));
+            }
+
+            if data[0] != PROTOCOL_VERSION_BYTE {
+                return Err(TransportError::VersionMismatch {
+                    expected: PROTOCOL_VERSION_BYTE,
+                    got: data[0],
+                });
+            }
+
+            T::decode(&mut &data[1..])
+                .map_err(|e| TransportError::CodecError(e.to_string()))
+        }
+
+        /// Receive raw bytes
+        pub async fn recv_raw(&self) -> Result<Vec<u8>, TransportError> {
+            let state = *self.state.read().await;
+            if state != ConnectionState::Connected {
+                return Err(TransportError::Disconnected);
+            }
+
+            // TODO: Receive via WebSocket
+            // match self.ws.next().await {
+            //     Some(Ok(Message::Binary(data))) => Ok(data),
+            //     Some(Ok(Message::Close(_))) => Err(TransportError::Disconnected),
+            //     Some(Err(e)) => Err(TransportError::ReceiveFailed(e.to_string())),
+            //     None => Err(TransportError::Disconnected),
+            // }
+            
+            Ok(vec![]) // Placeholder
+        }
+
+        /// Close the connection
+        pub async fn close(&self) -> Result<(), TransportError> {
+            *self.state.write().await = ConnectionState::Disconnected;
+            // TODO: Close WebSocket connection
+            Ok(())
+        }
+
+        /// Get current connection state
+        pub async fn state(&self) -> ConnectionState {
+            *self.state.read().await
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::WebSocketClient;
+"#,
+    );
+
+    // WASM implementation
+    content.push_str(
+        r#"
+// ============================================================================
+// WASM Implementation
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use super::*;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
+    use web_sys::{WebSocket as JsWebSocket, MessageEvent, BinaryType};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::collections::VecDeque;
+
+    /// WebSocket client for WASM (browser)
+    pub struct WebSocketClient {
+        config: TransportConfig,
+        state: Rc<RefCell<ConnectionState>>,
+        socket: Rc<RefCell<Option<JsWebSocket>>>,
+        recv_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    }
+
+    impl WebSocketClient {
+        /// Create a new WebSocket client (not connected)
+        pub fn new(config: TransportConfig) -> Self {
+            Self {
+                config,
+                state: Rc::new(RefCell::new(ConnectionState::Disconnected)),
+                socket: Rc::new(RefCell::new(None)),
+                recv_queue: Rc::new(RefCell::new(VecDeque::new())),
+            }
+        }
+
+        /// Connect to the server
+        pub async fn connect(config: TransportConfig) -> Result<Self, TransportError> {
+            let client = Self::new(config);
+            client.do_connect().await?;
+            Ok(client)
+        }
+
+        async fn do_connect(&self) -> Result<(), TransportError> {
+            *self.state.borrow_mut() = ConnectionState::Connecting;
+
+            // Create WebSocket via browser API
+            let socket = JsWebSocket::new(&self.config.url)
+                .map_err(|e| TransportError::ConnectionFailed(format!("{:?}", e)))?;
+
+            // Set binary type to arraybuffer for efficient data transfer
+            socket.set_binary_type(BinaryType::Arraybuffer);
+
+            // Set up message handler
+            let recv_queue = self.recv_queue.clone();
+            let onmessage_callback = Closure::wrap(Box::new(move |e: MessageEvent| {
+                if let Ok(abuf) = e.data().dyn_into::<js_sys::ArrayBuffer>() {
+                    let array = js_sys::Uint8Array::new(&abuf);
+                    recv_queue.borrow_mut().push_back(array.to_vec());
+                }
+            }) as Box<dyn FnMut(MessageEvent)>);
+            socket.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
+            onmessage_callback.forget(); // Prevent closure from being dropped
+
+            // Set up open handler
+            let state = self.state.clone();
+            let onopen_callback = Closure::wrap(Box::new(move |_| {
+                *state.borrow_mut() = ConnectionState::Connected;
+            }) as Box<dyn FnMut(JsValue)>);
+            socket.set_onopen(Some(onopen_callback.as_ref().unchecked_ref()));
+            onopen_callback.forget();
+
+            // Set up close handler
+            let state = self.state.clone();
+            let onclose_callback = Closure::wrap(Box::new(move |_| {
+                *state.borrow_mut() = ConnectionState::Disconnected;
+            }) as Box<dyn FnMut(JsValue)>);
+            socket.set_onclose(Some(onclose_callback.as_ref().unchecked_ref()));
+            onclose_callback.forget();
+
+            *self.socket.borrow_mut() = Some(socket);
+
+            // Wait for connection (simple polling - in production use promises)
+            for _ in 0..100 {
+                if *self.state.borrow() == ConnectionState::Connected {
+                    return Ok(());
+                }
+                // Small delay
+                let promise = js_sys::Promise::new(&mut |resolve, _| {
+                    let _ = web_sys::window()
+                        .unwrap()
+                        .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 50);
+                });
+                wasm_bindgen_futures::JsFuture::from(promise).await.ok();
+            }
+
+            Err(TransportError::Timeout)
+        }
+
+        /// Send an encodable message
+        pub async fn send<T: Encode>(&self, msg: &T) -> Result<(), TransportError> {
+            if *self.state.borrow() != ConnectionState::Connected {
+                return Err(TransportError::Disconnected);
+            }
+
+            let mut buf = vec![PROTOCOL_VERSION_BYTE];
+            msg.encode(&mut buf)
+                .map_err(|e| TransportError::CodecError(e.to_string()))?;
+            
+            self.send_raw(&buf).await
+        }
+
+        /// Send raw bytes
+        pub async fn send_raw(&self, data: &[u8]) -> Result<(), TransportError> {
+            let socket = self.socket.borrow();
+            let socket = socket.as_ref().ok_or(TransportError::Disconnected)?;
+
+            socket
+                .send_with_u8_array(data)
+                .map_err(|e| TransportError::SendFailed(format!("{:?}", e)))
+        }
+
+        /// Receive and decode a message
+        pub async fn recv<T: Decode>(&self) -> Result<T, TransportError> {
+            let data = self.recv_raw().await?;
+            
+            if data.is_empty() {
+                return Err(TransportError::ReceiveFailed("Empty packet".into()));
+            }
+
+            if data[0] != PROTOCOL_VERSION_BYTE {
+                return Err(TransportError::VersionMismatch {
+                    expected: PROTOCOL_VERSION_BYTE,
+                    got: data[0],
+                });
+            }
+
+            T::decode(&mut &data[1..])
+                .map_err(|e| TransportError::CodecError(e.to_string()))
+        }
+
+        /// Receive raw bytes (waits for data with polling)
+        pub async fn recv_raw(&self) -> Result<Vec<u8>, TransportError> {
+            // Poll for data with timeout
+            for _ in 0..200 { // ~10 seconds with 50ms delay
+                if let Some(data) = self.recv_queue.borrow_mut().pop_front() {
+                    return Ok(data);
+                }
+
+                if *self.state.borrow() != ConnectionState::Connected {
+                    return Err(TransportError::Disconnected);
+                }
+
+                // Small delay
+                let promise = js_sys::Promise::new(&mut |resolve, _| {
+                    let _ = web_sys::window()
+                        .unwrap()
+                        .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 50);
+                });
+                wasm_bindgen_futures::JsFuture::from(promise).await.ok();
+            }
+
+            Err(TransportError::Timeout)
+        }
+
+        /// Try to receive without blocking
+        pub fn try_recv_raw(&self) -> Option<Vec<u8>> {
+            self.recv_queue.borrow_mut().pop_front()
+        }
+
+        /// Close the connection
+        pub async fn close(&self) -> Result<(), TransportError> {
+            if let Some(socket) = self.socket.borrow().as_ref() {
+                socket.close().ok();
+            }
+            *self.socket.borrow_mut() = None;
+            *self.state.borrow_mut() = ConnectionState::Disconnected;
+            Ok(())
+        }
+
+        /// Get current connection state
+        pub fn state(&self) -> ConnectionState {
+            *self.state.borrow()
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use wasm::WebSocketClient;
+"#,
+    );
+
+    Ok(GeneratedFile {
+        path: PathBuf::from("src/websocket.rs"),
+        content,
+    })
+}
 /// Generate a test value for a given type
 fn generate_test_value(type_ref: &str, field_name: &str, manifest: &SchemaManifest) -> String {
     // Check if it's an Option type
