@@ -141,18 +141,15 @@ Motto follows a three-phase compiler architecture:
 - **Kotlin**: Android/JVM SDK with kotlinx.serialization support
 - **Unity/C#**: C# wrappers with unsafe pointers for memory-efficient DllImport
 
-## Deployment Philosophy: The $5 Stack
+## Deployment Philosophy: Scale From Small to Large
 
-Motto isn't just about code generation; it's about making distributed systems affordable. By pairing the generated SDK with the **Mottomesh Template**, you can run a full production stack:
+Motto is designed to grow with you. The same protocol works whether you're:
 
-| Component | Implementation | Memory |
-|-----------|---------------|--------|
-| Gateway | Rust WebTransport/WebSocket bridge | ~30MB |
-| Message Bus | NATS Core (stateless) | ~20MB |
-| Game Server | Your Rust logic | ~50MB |
-| **Total** | | **<100MB** |
+- **Prototyping** on a single $5 VPS
+- **Launching** with a small cluster
+- **Scaling** to millions of concurrent users
 
-This allows you to host a real-time cluster on a **$5/mo VPS** without breaking a sweat.
+The generated SDKs are infrastructure-agnostic — plug them into WebTransport, WebSocket, NATS, Kafka, or raw TCP. No code changes required as you scale.
 
 ### A/B Deployment with Version Routing
 
