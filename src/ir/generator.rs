@@ -410,6 +410,7 @@ fn to_pascal_case(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::parser::SchemaParser;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_generate_manifest() {

@@ -89,6 +89,7 @@ impl Default for SchemaParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_parse_plain_struct_default_mode() {

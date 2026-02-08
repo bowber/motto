@@ -242,6 +242,7 @@ impl Default for DatagramBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[tokio::test]
     async fn test_client_state() {

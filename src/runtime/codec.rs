@@ -327,6 +327,7 @@ impl Default for PacketBuilder {
 mod tests {
     use super::*;
     use bitcode::{Decode, Encode};
+    use pretty_assertions::assert_eq;
 
     #[derive(Debug, Clone, PartialEq, Encode, Decode)]
     struct TestMessage {

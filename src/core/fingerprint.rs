@@ -187,6 +187,7 @@ fn type_ref_signature(ty: &crate::core::types::TypeRef) -> String {
 mod tests {
     use super::*;
     use crate::core::parser::SchemaParser;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_fingerprint_stability() {
