@@ -1,6 +1,6 @@
 [package]
 name = "motto"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 authors = ["bowber <baolam.9a9@gmail.com>"]
 description = "Compiler-as-a-Service: Turn Rust schema.rs into multi-platform SDK toolkits"
