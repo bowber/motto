@@ -698,10 +698,10 @@ class MottoSdkTests {{
     fun packetBuilderWritesHeader() {{
         val builder = PacketBuilder()
         val data = builder.build()
-        val view = PacketView(data)
+        val reader = PacketReader(data)
 
-        assertEquals(PROTOCOL_VERSION_BYTE, view.getVersionByte())
-        assertTrue(view.validateVersion())
+        assertEquals(PROTOCOL_VERSION_BYTE, data[0])
+        assertTrue(reader.validateVersion())
     }}
 }}
 "#,
