@@ -892,8 +892,9 @@ fn generate_dotnet_sdk_project() -> Result<GeneratedFile> {
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="Runtime/**/*.cs" />
-    <Compile Remove="Runtime/Tests/**/*.cs" />
+    <Compile Include="Runtime/Types.cs" />
+    <Compile Include="Runtime/Codec.cs" />
+    <Compile Include="Runtime/NativeBridge.cs" />
   </ItemGroup>
 </Project>
 "#
