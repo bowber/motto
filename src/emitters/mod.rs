@@ -3,10 +3,14 @@
 //! Generates platform-specific SDK code from the IR manifest.
 //! Implements Single-Version Policy with 1-byte version header.
 
+#[cfg(feature = "emitter-kotlin")]
 pub mod kotlin;
 pub mod rust;
+#[cfg(feature = "emitter-swift")]
 pub mod swift;
+#[cfg(feature = "emitter-typescript")]
 pub mod typescript;
+#[cfg(feature = "emitter-unity")]
 pub mod unity;
 
 use crate::ir::manifest::SchemaManifest;

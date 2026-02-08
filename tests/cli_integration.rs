@@ -59,14 +59,19 @@ fn test_cli_generate_all_targets() {
         .assert()
         .success();
 
-    // Check all target dirs exist
+    // Check all target dirs exist (default features include all emitters)
+    #[cfg(feature = "emitter-typescript")]
     assert!(dir.path().join("generated/typescript").is_dir());
+    #[cfg(feature = "emitter-swift")]
     assert!(dir.path().join("generated/swift").is_dir());
+    #[cfg(feature = "emitter-kotlin")]
     assert!(dir.path().join("generated/kotlin").is_dir());
+    #[cfg(feature = "emitter-unity")]
     assert!(dir.path().join("generated/unity").is_dir());
     assert!(dir.path().join("generated/rust").is_dir());
 }
 
+#[cfg(feature = "emitter-typescript")]
 #[test]
 fn test_cli_generate_specific_targets() {
     let dir = TempDir::new().unwrap();

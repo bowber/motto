@@ -1,5 +1,9 @@
 # Motto: The Minimalist Bit-Level Toolchain
 
+[![CI](https://github.com/bowber/motto/actions/workflows/ci.yml/badge.svg)](https://github.com/bowber/motto/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/motto.svg)](https://crates.io/crates/motto)
+[![License](https://img.shields.io/crates/l/motto.svg)](LICENSE-MIT)
+
 **Motto** turns your Rust structs into high-performance, bit-packed binary protocols with automated multi-platform SDK generation. Optimized for extreme efficiency on low-resource environments (e.g., 2GB RAM VPS).
 
 ## Why Motto?
@@ -55,6 +59,30 @@ Or build from source:
 git clone https://github.com/bowber/motto
 cd motto
 cargo build --release
+```
+
+## Feature Flags
+
+Motto uses Cargo feature flags to control which emitters are compiled:
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `all-emitters` | Yes | Enables all platform emitters |
+| `emitter-typescript` | Yes (via `all-emitters`) | TypeScript/WASM SDK generation |
+| `emitter-swift` | Yes (via `all-emitters`) | Swift SDK generation |
+| `emitter-kotlin` | Yes (via `all-emitters`) | Kotlin SDK generation |
+| `emitter-unity` | Yes (via `all-emitters`) | Unity/C# SDK generation |
+
+The Rust emitter is always available (no feature flag required).
+
+To install with only specific emitters:
+
+```bash
+# Only Rust + TypeScript
+cargo install motto --no-default-features --features emitter-typescript
+
+# Only Rust (smallest binary)
+cargo install motto --no-default-features
 ```
 
 ## Quick Start
@@ -646,6 +674,17 @@ The generated SDKs include:
 - **State Machine**: Connection state management with retry logic
 - **Compression**: Optional Zstd compression/decompression
 - **Transport Abstraction**: Plug in WebTransport, WebSocket, NATS, or raw TCP
+
+### Transport Status
+
+The generated Rust SDK includes transport modules behind feature flags (`webtransport`, `websocket`):
+
+| Transport | WASM | Native |
+|-----------|------|--------|
+| WebTransport | Implemented (via `web_sys`) | Stub (bring your own `wtransport` impl) |
+| WebSocket | Implemented (via `web_sys`) | Stub (bring your own `tokio-tungstenite` impl) |
+
+Native transport stubs return clear errors at runtime. To use native transports, add the appropriate crate (`wtransport` or `tokio-tungstenite`) to your generated SDK's `Cargo.toml` and implement the `do_connect`, `send_raw`, and `recv_raw` methods in the generated transport files.
 
 ## Supported Types
 

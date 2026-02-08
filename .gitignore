@@ -9,3 +9,7 @@
 .idea/
 .vscode/
 *.iml
+
+# Stray schema files from testing
+src/schema.rs
+src/schema.rs.bak

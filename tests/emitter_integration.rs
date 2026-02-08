@@ -57,6 +57,7 @@ fn file_paths(files: &[motto::emitters::GeneratedFile]) -> Vec<String> {
 // TypeScript emitter tests
 // ============================================================================
 
+#[cfg(feature = "emitter-typescript")]
 #[test]
 fn test_typescript_emitter_generates_files() {
     use motto::emitters::typescript::TypeScriptEmitter;
@@ -77,6 +78,7 @@ fn test_typescript_emitter_generates_files() {
     assert!(!paths.contains(&"src/wasm.ts".to_string()));
 }
 
+#[cfg(feature = "emitter-typescript")]
 #[test]
 fn test_typescript_emitter_content() {
     use motto::emitters::typescript::TypeScriptEmitter;
@@ -114,6 +116,7 @@ fn test_typescript_emitter_content() {
     );
 }
 
+#[cfg(feature = "emitter-typescript")]
 #[test]
 fn test_typescript_emitter_wasm_bindings() {
     use motto::emitters::typescript::TypeScriptEmitter;
@@ -144,6 +147,7 @@ fn test_typescript_emitter_wasm_bindings() {
 // Swift emitter tests
 // ============================================================================
 
+#[cfg(feature = "emitter-swift")]
 #[test]
 fn test_swift_emitter_generates_files() {
     use motto::emitters::swift::SwiftEmitter;
@@ -161,6 +165,7 @@ fn test_swift_emitter_generates_files() {
     assert!(paths.contains(&"Package.swift".to_string()));
 }
 
+#[cfg(feature = "emitter-swift")]
 #[test]
 fn test_swift_emitter_content() {
     use motto::emitters::swift::SwiftEmitter;
@@ -200,6 +205,7 @@ fn test_swift_emitter_content() {
 // Kotlin emitter tests
 // ============================================================================
 
+#[cfg(feature = "emitter-kotlin")]
 #[test]
 fn test_kotlin_emitter_generates_files() {
     use motto::emitters::kotlin::KotlinEmitter;
@@ -217,6 +223,7 @@ fn test_kotlin_emitter_generates_files() {
     assert!(paths.contains(&"build.gradle.kts".to_string()));
 }
 
+#[cfg(feature = "emitter-kotlin")]
 #[test]
 fn test_kotlin_emitter_content() {
     use motto::emitters::kotlin::KotlinEmitter;
@@ -256,6 +263,7 @@ fn test_kotlin_emitter_content() {
 // Unity emitter tests
 // ============================================================================
 
+#[cfg(feature = "emitter-unity")]
 #[test]
 fn test_unity_emitter_generates_files() {
     use motto::emitters::unity::UnityEmitter;
@@ -274,6 +282,7 @@ fn test_unity_emitter_generates_files() {
     assert!(paths.contains(&"Motto.SDK.asmdef".to_string()));
 }
 
+#[cfg(feature = "emitter-unity")]
 #[test]
 fn test_unity_emitter_content() {
     use motto::emitters::unity::UnityEmitter;

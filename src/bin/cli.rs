@@ -190,7 +190,17 @@ fn cmd_generate(args: GenerateArgs) -> Result<()> {
 
     // Parse targets
     let targets: Vec<&str> = if args.targets == "all" {
-        vec!["typescript", "swift", "kotlin", "unity", "rust"]
+        let mut t = Vec::new();
+        #[cfg(feature = "emitter-typescript")]
+        t.push("typescript");
+        #[cfg(feature = "emitter-swift")]
+        t.push("swift");
+        #[cfg(feature = "emitter-kotlin")]
+        t.push("kotlin");
+        #[cfg(feature = "emitter-unity")]
+        t.push("unity");
+        t.push("rust");
+        t
     } else {
         args.targets.split(',').map(|s| s.trim()).collect()
     };
@@ -210,12 +220,19 @@ fn cmd_generate(args: GenerateArgs) -> Result<()> {
         };
 
         match target {
+            #[cfg(feature = "emitter-typescript")]
             "typescript" => motto::emitters::typescript::emit(&config)?,
+            #[cfg(feature = "emitter-swift")]
             "swift" => motto::emitters::swift::emit(&config)?,
+            #[cfg(feature = "emitter-kotlin")]
             "kotlin" => motto::emitters::kotlin::emit(&config)?,
+            #[cfg(feature = "emitter-unity")]
             "unity" => motto::emitters::unity::emit(&config)?,
             "rust" => motto::emitters::rust::emit(&config)?,
-            _ => anyhow::bail!("Unknown target: {}", target),
+            _ => anyhow::bail!(
+                "Unknown target: {}. Make sure the corresponding emitter feature is enabled.",
+                target
+            ),
         }
     }
 

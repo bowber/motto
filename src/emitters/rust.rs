@@ -1317,20 +1317,23 @@ mod native {
         async fn do_connect(&self) -> Result<(), TransportError> {
             *self.state.write().await = ConnectionState::Connecting;
             
-            // TODO: Implement actual wtransport connection
-            // For now, this is a placeholder that shows the structure
+            // Native WebTransport is not yet implemented.
+            // Add `wtransport` to your Cargo.toml and implement the connection logic here.
+            // See https://docs.rs/wtransport for the client API.
             //
+            // Example:
             // let endpoint = wtransport::Endpoint::client(
             //     wtransport::ClientConfig::builder()
             //         .with_bind_default()
-            //         .with_no_cert_validation() // For development
+            //         .with_no_cert_validation()
             //         .build()
             // )?;
-            //
             // let connection = endpoint.connect(&self.config.url).await?;
             
-            *self.state.write().await = ConnectionState::Connected;
-            Ok(())
+            *self.state.write().await = ConnectionState::Disconnected;
+            Err(TransportError::ConnectionFailed(
+                "Native WebTransport not yet implemented. Add `wtransport` crate and implement do_connect().".into()
+            ))
         }
 
         /// Send an encodable message
@@ -1354,11 +1357,12 @@ mod native {
                 return Err(TransportError::Disconnected);
             }
 
-            // TODO: Send via wtransport datagram
+            // Native WebTransport send not yet implemented.
             // self.connection.send_datagram(data).await?;
-            
-            let _ = data; // Placeholder
-            Ok(())
+            let _ = data;
+            Err(TransportError::SendFailed(
+                "Native WebTransport send not yet implemented.".into()
+            ))
         }
 
         /// Receive and decode a message
@@ -1387,10 +1391,11 @@ mod native {
                 return Err(TransportError::Disconnected);
             }
 
-            // TODO: Receive via wtransport datagram
+            // Native WebTransport recv not yet implemented.
             // let data = self.connection.receive_datagram().await?;
-            
-            Ok(vec![]) // Placeholder
+            Err(TransportError::ReceiveFailed(
+                "Native WebTransport recv not yet implemented.".into()
+            ))
         }
 
         /// Close the connection
@@ -1678,15 +1683,19 @@ mod native {
         async fn do_connect(&self) -> Result<(), TransportError> {
             *self.state.write().await = ConnectionState::Connecting;
             
-            // TODO: Implement actual tokio-tungstenite connection
-            // For now, this is a placeholder that shows the structure
+            // Native WebSocket is not yet implemented.
+            // Add `tokio-tungstenite` to your Cargo.toml and implement the connection logic here.
+            // See https://docs.rs/tokio-tungstenite for the client API.
             //
+            // Example:
             // let (ws_stream, _) = tokio_tungstenite::connect_async(&self.config.url)
             //     .await
             //     .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
             
-            *self.state.write().await = ConnectionState::Connected;
-            Ok(())
+            *self.state.write().await = ConnectionState::Disconnected;
+            Err(TransportError::ConnectionFailed(
+                "Native WebSocket not yet implemented. Add `tokio-tungstenite` crate and implement do_connect().".into()
+            ))
         }
 
         /// Send an encodable message
@@ -1710,12 +1719,13 @@ mod native {
                 return Err(TransportError::Disconnected);
             }
 
-            // TODO: Send via WebSocket binary message
+            // Native WebSocket send not yet implemented.
             // use tokio_tungstenite::tungstenite::Message;
             // self.ws.send(Message::Binary(data.to_vec())).await?;
-            
-            let _ = data; // Placeholder
-            Ok(())
+            let _ = data;
+            Err(TransportError::SendFailed(
+                "Native WebSocket send not yet implemented.".into()
+            ))
         }
 
         /// Receive and decode a message
@@ -1744,15 +1754,10 @@ mod native {
                 return Err(TransportError::Disconnected);
             }
 
-            // TODO: Receive via WebSocket
-            // match self.ws.next().await {
-            //     Some(Ok(Message::Binary(data))) => Ok(data),
-            //     Some(Ok(Message::Close(_))) => Err(TransportError::Disconnected),
-            //     Some(Err(e)) => Err(TransportError::ReceiveFailed(e.to_string())),
-            //     None => Err(TransportError::Disconnected),
-            // }
-            
-            Ok(vec![]) // Placeholder
+            // Native WebSocket recv not yet implemented.
+            Err(TransportError::ReceiveFailed(
+                "Native WebSocket recv not yet implemented.".into()
+            ))
         }
 
         /// Close the connection
