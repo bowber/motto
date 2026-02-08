@@ -3,7 +3,7 @@
 use crate::runtime::codec::PROTOCOL_VERSION;
 use crate::runtime::state::{ConnectionState, RetryConfig, StateMachine};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 /// WebTransport client configuration
 #[derive(Debug, Clone)]
@@ -33,7 +33,7 @@ impl Default for TransportConfig {
 }
 
 /// WebTransport client
-/// 
+///
 /// Note: This is a placeholder implementation. Actual WebTransport
 /// requires a proper QUIC/HTTP3 implementation like `wtransport` or `h3`.
 pub struct WebTransportClient {
@@ -68,7 +68,9 @@ impl WebTransportClient {
     pub async fn connect(&mut self) -> Result<(), TransportError> {
         {
             let mut state = self.state.write().await;
-            state.start_connecting().map_err(|_| TransportError::InvalidState)?;
+            state
+                .start_connecting()
+                .map_err(|_| TransportError::InvalidState)?;
         }
 
         // TODO: Implement actual WebTransport connection
@@ -88,13 +90,15 @@ impl WebTransportClient {
         // Simulate successful connection
         {
             let mut state = self.state.write().await;
-            state.connected().map_err(|_| TransportError::InvalidState)?;
+            state
+                .connected()
+                .map_err(|_| TransportError::InvalidState)?;
         }
 
         // Start background tasks for sending/receiving
         let state = Arc::clone(&self.state);
         let _incoming_tx = incoming_tx;
-        
+
         tokio::spawn(async move {
             // TODO: Receive loop
             // while let Some(datagram) = connection.receive_datagram().await {
@@ -132,20 +136,31 @@ impl WebTransportClient {
             });
         }
 
-        let tx = self.outgoing_tx.as_ref().ok_or(TransportError::NotConnected)?;
-        tx.send(data).await.map_err(|_| TransportError::SendFailed)?;
+        let tx = self
+            .outgoing_tx
+            .as_ref()
+            .ok_or(TransportError::NotConnected)?;
+        tx.send(data)
+            .await
+            .map_err(|_| TransportError::SendFailed)?;
         Ok(())
     }
 
     /// Receive a datagram
     pub async fn receive(&mut self) -> Result<Vec<u8>, TransportError> {
-        let rx = self.incoming_rx.as_mut().ok_or(TransportError::NotConnected)?;
+        let rx = self
+            .incoming_rx
+            .as_mut()
+            .ok_or(TransportError::NotConnected)?;
         rx.recv().await.ok_or(TransportError::ConnectionClosed)
     }
 
     /// Try to receive without blocking
     pub fn try_receive(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
-        let rx = self.incoming_rx.as_mut().ok_or(TransportError::NotConnected)?;
+        let rx = self
+            .incoming_rx
+            .as_mut()
+            .ok_or(TransportError::NotConnected)?;
         match rx.try_recv() {
             Ok(data) => Ok(Some(data)),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),

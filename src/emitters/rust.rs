@@ -6,7 +6,7 @@
 //! - Bitcode-compatible encode/decode implementations
 //! - Zero-copy packet framing
 
-use crate::emitters::{utils, Emitter, EmitterConfig, GeneratedFile};
+use crate::emitters::{Emitter, EmitterConfig, GeneratedFile, utils};
 use crate::ir::manifest::*;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -32,24 +32,20 @@ impl Emitter for RustEmitter {
     }
 
     fn emit(&self, config: &EmitterConfig) -> Result<Vec<GeneratedFile>> {
-        let mut files = Vec::new();
-
-        // Generate lib.rs with types and router
-        files.push(generate_lib(&config.manifest)?);
-
-        // Generate codec.rs with encode/decode
-        files.push(generate_codec(&config.manifest)?);
-
-        // Generate Cargo.toml
-        files.push(generate_cargo_toml(&config.manifest)?);
-
-        // Generate tests
-        files.push(generate_tests(&config.manifest)?);
-
-        // Generate transport modules (feature-gated)
-        files.push(generate_transport_common(&config.manifest)?);
-        files.push(generate_webtransport(&config.manifest)?);
-        files.push(generate_websocket(&config.manifest)?);
+        let files = vec![
+            // Generate lib.rs with types and router
+            generate_lib(&config.manifest)?,
+            // Generate codec.rs with encode/decode
+            generate_codec(&config.manifest)?,
+            // Generate Cargo.toml
+            generate_cargo_toml(&config.manifest)?,
+            // Generate tests
+            generate_tests(&config.manifest)?,
+            // Generate transport modules (feature-gated)
+            generate_transport_common(&config.manifest)?,
+            generate_webtransport(&config.manifest)?,
+            generate_websocket(&config.manifest)?,
+        ];
 
         Ok(files)
     }
@@ -294,7 +290,7 @@ fn generate_router_enum(router: &RouterManifest, manifest: &SchemaManifest) -> S
             variant.discriminant
         ));
     }
-    s.push_str("\n");
+    s.push('\n');
 
     // Generate tag() method
     s.push_str("    /// Get the discriminant tag for this message\n");
@@ -340,10 +336,10 @@ fn generate_router_enum(router: &RouterManifest, manifest: &SchemaManifest) -> S
             .messages
             .iter()
             .find(|m| m.name == variant.message_type);
-        if let Some(msg) = msg {
-            if let Some(docs) = &msg.docs {
-                s.push_str(&format!("    /// Handle: {}\n", docs));
-            }
+        if let Some(msg) = msg
+            && let Some(docs) = &msg.docs
+        {
+            s.push_str(&format!("    /// Handle: {}\n", docs));
         }
         s.push_str(&format!(
             "    fn handle_{}(&mut self, msg: {}) -> Self::Output;\n",
@@ -2015,7 +2011,7 @@ fn generate_test_value(type_ref: &str, field_name: &str, manifest: &SchemaManife
             // Check if it's an enum
             if let Some(e) = manifest.enums.iter().find(|e| e.name == type_ref) {
                 if e.is_simple && !e.variants.is_empty() {
-                    return format!("{}::{}", e.name, e.variants[0].name);
+                    format!("{}::{}", e.name, e.variants[0].name)
                 } else if !e.variants.is_empty() {
                     // For complex enums, use the first unit variant if available
                     for v in &e.variants {
@@ -2075,7 +2071,7 @@ fn generate_roundtrip_test(msg: &MessageDef) -> String {
     let mut s = String::new();
     let fn_name = utils::to_snake_case(&msg.name);
 
-    s.push_str(&format!("#[test]\n"));
+    s.push_str("#[test]\n");
     s.push_str(&format!("fn test_{}_roundtrip() {{\n", fn_name));
     s.push_str(&format!("    let original = create_test_{}();\n", fn_name));
     s.push_str("    \n");
@@ -2097,7 +2093,7 @@ fn generate_roundtrip_test(msg: &MessageDef) -> String {
     s.push_str("}\n\n");
 
     // Also add a raw encode/decode test (without version byte wrapper)
-    s.push_str(&format!("#[test]\n"));
+    s.push_str("#[test]\n");
     s.push_str(&format!("fn test_{}_encode_decode() {{\n", fn_name));
     s.push_str(&format!("    let original = create_test_{}();\n", fn_name));
     s.push_str("    \n");
@@ -2127,7 +2123,7 @@ fn generate_enum_tests(e: &EnumManifest) -> String {
 
     if e.is_simple {
         // Test all variants of simple enum
-        s.push_str(&format!("#[test]\n"));
+        s.push_str("#[test]\n");
         s.push_str(&format!("fn test_{}_variants() {{\n", fn_name));
 
         for v in &e.variants {
@@ -2147,7 +2143,7 @@ fn generate_enum_tests(e: &EnumManifest) -> String {
         s.push_str("}\n\n");
 
         // Test discriminant values
-        s.push_str(&format!("#[test]\n"));
+        s.push_str("#[test]\n");
         s.push_str(&format!("fn test_{}_discriminants() {{\n", fn_name));
         for v in &e.variants {
             s.push_str(&format!(
@@ -2158,7 +2154,7 @@ fn generate_enum_tests(e: &EnumManifest) -> String {
         s.push_str("}\n\n");
     } else {
         // Test complex enum variants
-        s.push_str(&format!("#[test]\n"));
+        s.push_str("#[test]\n");
         s.push_str(&format!("fn test_{}_roundtrip() {{\n", fn_name));
 
         // Test unit variants
@@ -2191,7 +2187,7 @@ fn generate_router_tests(router: &RouterManifest, manifest: &SchemaManifest) -> 
     let router_fn_name = utils::to_snake_case(router_name);
 
     // Test tag values are unique and correct
-    s.push_str(&format!("#[test]\n"));
+    s.push_str("#[test]\n");
     s.push_str(&format!("fn test_{}_tag_values() {{\n", router_fn_name));
     s.push_str("    // Verify each variant has the expected tag\n");
 
@@ -2210,7 +2206,7 @@ fn generate_router_tests(router: &RouterManifest, manifest: &SchemaManifest) -> 
     s.push_str("}\n\n");
 
     // Test type_name_from_tag
-    s.push_str(&format!("#[test]\n"));
+    s.push_str("#[test]\n");
     s.push_str(&format!(
         "fn test_{}_type_name_from_tag() {{\n",
         router_fn_name
@@ -2230,32 +2226,32 @@ fn generate_router_tests(router: &RouterManifest, manifest: &SchemaManifest) -> 
     s.push_str("}\n\n");
 
     // Test router roundtrip for each variant
-    s.push_str(&format!("#[test]\n"));
+    s.push_str("#[test]\n");
     s.push_str(&format!("fn test_{}_roundtrip() {{\n", router_fn_name));
 
     for v in &router.variants {
         // Only test non-generic message types
-        if let Some(msg) = manifest.messages.iter().find(|m| m.name == v.message_type) {
-            if msg.generics.is_empty() {
-                let msg_fn_name = utils::to_snake_case(&v.message_type);
-                s.push_str(&format!("    // Test {}::{}\n", router_name, v.name));
-                s.push_str(&format!(
-                    "    let msg = {}::{}(create_test_{}());\n",
-                    router_name, v.name, msg_fn_name
-                ));
-                s.push_str(&format!(
-                    "    assert_eq!(msg.tag(), {}::{}_TAG);\n",
-                    router_name,
-                    utils::to_snake_case(&v.name).to_uppercase()
-                ));
-                s.push_str("    let encoded = msg.to_bytes();\n");
-                s.push_str(&format!(
-                    "    let decoded = {}::from_bytes(&encoded).expect(\"Decode should succeed\");\n",
-                    router_name
-                ));
-                s.push_str("    assert_eq!(msg, decoded);\n");
-                s.push_str("    \n");
-            }
+        if let Some(msg) = manifest.messages.iter().find(|m| m.name == v.message_type)
+            && msg.generics.is_empty()
+        {
+            let msg_fn_name = utils::to_snake_case(&v.message_type);
+            s.push_str(&format!("    // Test {}::{}\n", router_name, v.name));
+            s.push_str(&format!(
+                "    let msg = {}::{}(create_test_{}());\n",
+                router_name, v.name, msg_fn_name
+            ));
+            s.push_str(&format!(
+                "    assert_eq!(msg.tag(), {}::{}_TAG);\n",
+                router_name,
+                utils::to_snake_case(&v.name).to_uppercase()
+            ));
+            s.push_str("    let encoded = msg.to_bytes();\n");
+            s.push_str(&format!(
+                "    let decoded = {}::from_bytes(&encoded).expect(\"Decode should succeed\");\n",
+                router_name
+            ));
+            s.push_str("    assert_eq!(msg, decoded);\n");
+            s.push_str("    \n");
         }
     }
 
@@ -2289,7 +2285,7 @@ fn generate_router_tests(router: &RouterManifest, manifest: &SchemaManifest) -> 
     s.push_str("}\n\n");
 
     // Test that handler is called correctly
-    s.push_str(&format!("#[test]\n"));
+    s.push_str("#[test]\n");
     s.push_str(&format!("fn test_{}_handler() {{\n", router_fn_name));
     s.push_str(&format!(
         "    let mut handler = Test{}Handler {{ calls: Vec::new() }};\n",
@@ -2299,21 +2295,21 @@ fn generate_router_tests(router: &RouterManifest, manifest: &SchemaManifest) -> 
 
     // Route first non-generic message
     for v in &router.variants {
-        if let Some(msg) = manifest.messages.iter().find(|m| m.name == v.message_type) {
-            if msg.generics.is_empty() {
-                let msg_fn_name = utils::to_snake_case(&v.message_type);
-                s.push_str(&format!(
-                    "    let msg = {}::{}(create_test_{}());\n",
-                    router_name, v.name, msg_fn_name
-                ));
-                s.push_str("    msg.route(&mut handler);\n");
-                s.push_str(&format!(
-                    "    assert_eq!(handler.calls.last(), Some(&\"{}\".to_string()));\n",
-                    v.name
-                ));
-                s.push_str("    \n");
-                break; // Just test one for brevity
-            }
+        if let Some(msg) = manifest.messages.iter().find(|m| m.name == v.message_type)
+            && msg.generics.is_empty()
+        {
+            let msg_fn_name = utils::to_snake_case(&v.message_type);
+            s.push_str(&format!(
+                "    let msg = {}::{}(create_test_{}());\n",
+                router_name, v.name, msg_fn_name
+            ));
+            s.push_str("    msg.route(&mut handler);\n");
+            s.push_str(&format!(
+                "    assert_eq!(handler.calls.last(), Some(&\"{}\".to_string()));\n",
+                v.name
+            ));
+            s.push_str("    \n");
+            break; // Just test one for brevity
         }
     }
 

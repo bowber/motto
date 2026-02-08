@@ -107,7 +107,7 @@ impl SchemaVisitor {
             return;
         }
 
-        let variants = e.variants.iter().map(|v| convert_variant(v)).collect();
+        let variants = e.variants.iter().map(convert_variant).collect();
 
         let generics = convert_generics(&e.generics);
         let repr = extract_repr(&e.attrs);
@@ -141,15 +141,13 @@ impl SchemaVisitor {
         // Check for derive(Serialize, Deserialize) or motto attribute
         for attr in attrs {
             // Check derive macro for Serialize/Deserialize
-            if attr.path == "derive" {
-                if let Some(args) = &attr.args {
-                    if args.contains("Serialize")
-                        || args.contains("Deserialize")
-                        || args.contains("bitcode")
-                    {
-                        return true;
-                    }
-                }
+            if attr.path == "derive"
+                && let Some(args) = &attr.args
+                && (args.contains("Serialize")
+                    || args.contains("Deserialize")
+                    || args.contains("bitcode"))
+            {
+                return true;
             }
             // Check for motto attribute
             if attr.path == "motto" || attr.path.starts_with("motto::") {
@@ -196,16 +194,14 @@ fn extract_docs(attrs: &[SynAttr]) -> Option<String> {
     let docs: Vec<String> = attrs
         .iter()
         .filter_map(|attr| {
-            if attr.path().is_ident("doc") {
-                if let syn::Meta::NameValue(nv) = &attr.meta {
-                    if let Expr::Lit(syn::ExprLit {
-                        lit: syn::Lit::Str(s),
-                        ..
-                    }) = &nv.value
-                    {
-                        return Some(s.value().trim().to_string());
-                    }
-                }
+            if attr.path().is_ident("doc")
+                && let syn::Meta::NameValue(nv) = &attr.meta
+                && let Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &nv.value
+            {
+                return Some(s.value().trim().to_string());
             }
             None
         })
@@ -220,10 +216,10 @@ fn extract_docs(attrs: &[SynAttr]) -> Option<String> {
 
 fn extract_repr(attrs: &[SynAttr]) -> Option<String> {
     for attr in attrs {
-        if attr.path().is_ident("repr") {
-            if let syn::Meta::List(list) = &attr.meta {
-                return Some(list.tokens.to_string());
-            }
+        if attr.path().is_ident("repr")
+            && let syn::Meta::List(list) = &attr.meta
+        {
+            return Some(list.tokens.to_string());
         }
     }
     None
@@ -231,19 +227,19 @@ fn extract_repr(attrs: &[SynAttr]) -> Option<String> {
 
 fn extract_default(attrs: &[SynAttr]) -> Option<String> {
     for attr in attrs {
-        if attr.path().is_ident("serde") {
-            if let syn::Meta::List(list) = &attr.meta {
-                let tokens = list.tokens.to_string();
-                if tokens.contains("default") {
-                    // Extract the default value if specified
-                    if let Some(start) = tokens.find("default = ") {
-                        let rest = &tokens[start + 10..];
-                        if let Some(end) = rest.find([',', ')']) {
-                            return Some(rest[..end].trim_matches('"').to_string());
-                        }
+        if attr.path().is_ident("serde")
+            && let syn::Meta::List(list) = &attr.meta
+        {
+            let tokens = list.tokens.to_string();
+            if tokens.contains("default") {
+                // Extract the default value if specified
+                if let Some(start) = tokens.find("default = ") {
+                    let rest = &tokens[start + 10..];
+                    if let Some(end) = rest.find([',', ')']) {
+                        return Some(rest[..end].trim_matches('"').to_string());
                     }
-                    return Some("Default::default()".to_string());
                 }
+                return Some("Default::default()".to_string());
             }
         }
     }
@@ -333,10 +329,10 @@ fn extract_array_size(expr: &Expr) -> Option<usize> {
 }
 
 fn is_optional_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(last) = type_path.path.segments.last() {
-            return last.ident == "Option";
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(last) = type_path.path.segments.last()
+    {
+        return last.ident == "Option";
     }
     false
 }

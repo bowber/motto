@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use motto::prelude::*;
 use std::path::PathBuf;
-use tracing::{info, Level};
+use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser)]
@@ -190,16 +190,20 @@ fn cmd_generate(args: GenerateArgs) -> Result<()> {
 
     // Parse targets
     let targets: Vec<&str> = if args.targets == "all" {
-        let mut t = Vec::new();
-        #[cfg(feature = "emitter-typescript")]
-        t.push("typescript");
-        #[cfg(feature = "emitter-swift")]
-        t.push("swift");
-        #[cfg(feature = "emitter-kotlin")]
-        t.push("kotlin");
-        #[cfg(feature = "emitter-unity")]
-        t.push("unity");
-        t.push("rust");
+        #[allow(clippy::vec_init_then_push)]
+        let t = {
+            let mut t = Vec::new();
+            #[cfg(feature = "emitter-typescript")]
+            t.push("typescript");
+            #[cfg(feature = "emitter-swift")]
+            t.push("swift");
+            #[cfg(feature = "emitter-kotlin")]
+            t.push("kotlin");
+            #[cfg(feature = "emitter-unity")]
+            t.push("unity");
+            t.push("rust");
+            t
+        };
         t
     } else {
         args.targets.split(',').map(|s| s.trim()).collect()
@@ -252,7 +256,7 @@ fn cmd_check(args: CheckArgs) -> Result<()> {
 
     // Load motto.lock
     let lock_content = std::fs::read_to_string(&args.lock).context("Failed to read motto.lock")?;
-    let lock = motto::ir::lock::MottoLock::from_str(&lock_content)?;
+    let lock = motto::ir::lock::MottoLock::parse_str(&lock_content)?;
 
     // Compare fingerprints
     if fingerprint.hash() == lock.fingerprint() {
@@ -287,7 +291,7 @@ fn cmd_lock(args: LockArgs) -> Result<()> {
     // Load or create motto.lock
     let mut lock = if args.lock.exists() {
         let content = std::fs::read_to_string(&args.lock)?;
-        motto::ir::lock::MottoLock::from_str(&content)?
+        motto::ir::lock::MottoLock::parse_str(&content)?
     } else {
         motto::ir::lock::MottoLock::new()
     };

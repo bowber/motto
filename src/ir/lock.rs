@@ -75,7 +75,7 @@ impl MottoLock {
     }
 
     /// Load from a string
-    pub fn from_str(content: &str) -> Result<Self> {
+    pub fn parse_str(content: &str) -> Result<Self> {
         // Support both TOML and JSON formats
         if content.trim().starts_with('{') {
             serde_json::from_str(content).context("Failed to parse motto.lock as JSON")
@@ -167,7 +167,7 @@ mod tests {
         lock.bump_minor();
 
         let serialized = lock.to_string().unwrap();
-        let deserialized = MottoLock::from_str(&serialized).unwrap();
+        let deserialized = MottoLock::parse_str(&serialized).unwrap();
 
         assert_eq!(deserialized.version.major, 0);
         assert_eq!(deserialized.version.minor, 2); // Started at 0.1.0, bumped to 0.2.0

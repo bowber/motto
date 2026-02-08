@@ -5,7 +5,7 @@
 //! - Zero-copy interface for packet framing
 //! - 1-byte version header support
 
-use crate::emitters::{utils, Emitter, EmitterConfig, GeneratedFile};
+use crate::emitters::{Emitter, EmitterConfig, GeneratedFile, utils};
 use crate::ir::manifest::*;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -87,19 +87,16 @@ impl Emitter for TypeScriptEmitter {
     }
 
     fn emit(&self, config: &EmitterConfig) -> Result<Vec<GeneratedFile>> {
-        let mut files = Vec::new();
-
-        // Generate main types file
-        files.push(generate_types(&config.manifest)?);
-
-        // Generate codec file
-        files.push(generate_codec(&config.manifest)?);
-
-        // Generate runtime file
-        files.push(generate_runtime(&config.manifest)?);
-
-        // Generate index file with exports
-        files.push(generate_index(&config.manifest, config)?);
+        let mut files = vec![
+            // Generate main types file
+            generate_types(&config.manifest)?,
+            // Generate codec file
+            generate_codec(&config.manifest)?,
+            // Generate runtime file
+            generate_runtime(&config.manifest)?,
+            // Generate index file with exports
+            generate_index(&config.manifest, config)?,
+        ];
 
         // Generate WASM bindings if requested
         if config.wasm_bindings {
@@ -146,7 +143,7 @@ fn generate_types(manifest: &SchemaManifest) -> Result<GeneratedFile> {
 
     // Generate type aliases first (they're often used by other types)
     for alias in &manifest.type_aliases {
-        content.push_str(&generate_type_alias(&alias));
+        content.push_str(&generate_type_alias(alias));
         content.push('\n');
     }
 
@@ -1245,7 +1242,7 @@ fn rust_to_ts_type(rust_type: &str) -> String {
             "HashSet" | "BTreeSet" => format!("Set<{}>", rust_to_ts_type(inner)),
             "Result" => {
                 let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-                if parts.len() >= 1 {
+                if !parts.is_empty() {
                     rust_to_ts_type(parts[0])
                 } else {
                     "unknown".to_string()

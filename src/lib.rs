@@ -25,19 +25,19 @@ pub mod emitters;
 pub mod ir;
 pub mod runtime;
 
-pub use core::parser::SchemaParser;
 pub use core::fingerprint::SchemaFingerprint;
+pub use core::parser::SchemaParser;
 pub use ir::generator::IrGenerator;
 pub use ir::manifest::SchemaManifest;
 
 /// Re-export commonly used types
 pub mod prelude {
-    pub use crate::core::parser::SchemaParser;
     pub use crate::core::fingerprint::SchemaFingerprint;
+    pub use crate::core::parser::SchemaParser;
     pub use crate::core::types::*;
+    pub use crate::emitters::EmitterConfig;
     pub use crate::ir::generator::IrGenerator;
     pub use crate::ir::manifest::SchemaManifest;
-    pub use crate::emitters::EmitterConfig;
     pub use crate::runtime::MottoRuntime;
 }
 

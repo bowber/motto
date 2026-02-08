@@ -5,7 +5,7 @@
 //! - WebAssembly.instantiate support
 //! - Zero-copy packet framing
 
-use crate::emitters::{utils, Emitter, EmitterConfig, GeneratedFile};
+use crate::emitters::{Emitter, EmitterConfig, GeneratedFile, utils};
 use crate::ir::manifest::*;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -103,13 +103,13 @@ impl Emitter for UnityEmitter {
     }
 
     fn emit(&self, config: &EmitterConfig) -> Result<Vec<GeneratedFile>> {
-        let mut files = Vec::new();
-
-        files.push(generate_types(&config.manifest)?);
-        files.push(generate_codec(&config.manifest)?);
-        files.push(generate_runtime(&config.manifest)?);
-        files.push(generate_native_bridge(&config.manifest)?);
-        files.push(generate_asmdef(&config.manifest)?);
+        let files = vec![
+            generate_types(&config.manifest)?,
+            generate_codec(&config.manifest)?,
+            generate_runtime(&config.manifest)?,
+            generate_native_bridge(&config.manifest)?,
+            generate_asmdef(&config.manifest)?,
+        ];
 
         Ok(files)
     }
@@ -854,8 +854,7 @@ namespace Motto.SDK
 }
 
 fn generate_asmdef(_manifest: &SchemaManifest) -> Result<GeneratedFile> {
-    let content = format!(
-        r#"{{
+    let content = r#"{
     "name": "Motto.SDK",
     "rootNamespace": "Motto.SDK",
     "references": [],
@@ -868,9 +867,9 @@ fn generate_asmdef(_manifest: &SchemaManifest) -> Result<GeneratedFile> {
     "defineConstraints": [],
     "versionDefines": [],
     "noEngineReferences": false
-}}
+}
 "#
-    );
+    .to_string();
 
     Ok(GeneratedFile {
         path: PathBuf::from("Motto.SDK.asmdef"),
