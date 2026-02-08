@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["Motto Team"]
 description = "Compiler-as-a-Service: Turn Rust schema.rs into multi-platform SDK toolkits"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/mottomesh/motto"
+repository = "https://github.com/bowber/motto"
 keywords = ["codegen", "sdk", "wasm", "serialization", "bitcode"]
 categories = ["development-tools", "compilers"]
 
