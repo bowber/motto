@@ -2,7 +2,7 @@
 name = "motto"
 version = "0.2.0"
 edition = "2024"
-authors = ["Motto Team"]
+authors = ["bowber <baolam.9a9@gmail.com>"]
 description = "Compiler-as-a-Service: Turn Rust schema.rs into multi-platform SDK toolkits"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bowber/motto"
