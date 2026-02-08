@@ -59,6 +59,7 @@ impl Emitter for KotlinEmitter {
             generate_codec(&config.manifest)?,
             generate_runtime(&config.manifest)?,
             generate_build_gradle(&config.manifest)?,
+            generate_tests(&config.manifest)?,
         ];
 
         Ok(files)
@@ -664,6 +665,40 @@ kotlin {{
 
     Ok(GeneratedFile {
         path: PathBuf::from("build.gradle.kts"),
+        content,
+    })
+}
+
+fn generate_tests(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+    let content = format!(
+        r#"package io.motto.sdk
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+class MottoSdkTests {{
+    @Test
+    fun protocolVersionByteMatchesManifest() {{
+        assertEquals(0x{:02X}.toByte(), PROTOCOL_VERSION_BYTE)
+    }}
+
+    @Test
+    fun packetBuilderWritesHeader() {{
+        val builder = PacketBuilder()
+        val data = builder.build()
+        val view = PacketView(data)
+
+        assertEquals(PROTOCOL_VERSION_BYTE, view.getVersionByte())
+        assertTrue(view.validateVersion())
+    }}
+}}
+"#,
+        manifest.meta.version_byte
+    );
+
+    Ok(GeneratedFile {
+        path: PathBuf::from("src/test/kotlin/io/motto/sdk/MottoSdkTests.kt"),
         content,
     })
 }

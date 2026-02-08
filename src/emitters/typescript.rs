@@ -105,6 +105,8 @@ impl Emitter for TypeScriptEmitter {
 
         // Generate package.json
         files.push(generate_package_json(&config.manifest)?);
+        // Generate tests
+        files.push(generate_tests(&config.manifest)?);
 
         Ok(files)
     }
@@ -1190,7 +1192,8 @@ fn generate_package_json(manifest: &SchemaManifest) -> Result<GeneratedFile> {
   }},
   "scripts": {{
     "build": "tsup src/index.ts --format esm,cjs --dts",
-    "dev": "tsup src/index.ts --format esm,cjs --dts --watch"
+    "dev": "tsup src/index.ts --format esm,cjs --dts --watch",
+    "test": "vitest run"
   }},
   "files": [
     "dist",
@@ -1198,7 +1201,8 @@ fn generate_package_json(manifest: &SchemaManifest) -> Result<GeneratedFile> {
   ],
   "devDependencies": {{
     "tsup": "^8.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^2.1.9"
   }},
   "motto": {{
     "fingerprint": "{fingerprint}",
@@ -1213,6 +1217,35 @@ fn generate_package_json(manifest: &SchemaManifest) -> Result<GeneratedFile> {
 
     Ok(GeneratedFile {
         path: PathBuf::from("package.json"),
+        content,
+    })
+}
+
+fn generate_tests(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+    let content = format!(
+        r#"import {{ describe, expect, it }} from "vitest";
+import {{ PacketBuilder, PacketView, PROTOCOL_VERSION_BYTE }} from "../src/codec";
+
+describe("codec smoke tests", () => {{
+  it("writes and reads the version header", () => {{
+    const builder = new PacketBuilder();
+    const data = builder.build();
+    const view = new PacketView(data);
+
+    expect(view.getVersionByte()).toBe(PROTOCOL_VERSION_BYTE);
+    expect(view.validateVersion()).toBe(true);
+  }});
+
+  it("pins generated protocol version", () => {{
+    expect(PROTOCOL_VERSION_BYTE).toBe({});
+  }});
+}});
+"#,
+        manifest.meta.version_byte
+    );
+
+    Ok(GeneratedFile {
+        path: PathBuf::from("tests/codec.test.ts"),
         content,
     })
 }

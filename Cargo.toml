@@ -24,7 +24,6 @@ clap = { version = "4", features = ["derive", "env"] }
 # Static Analysis (Syn-based Rust AST parsing)
 syn = { version = "2", features = ["full", "parsing", "visit", "extra-traits"] }
 quote = "1"
-proc-macro2 = "1"
 
 # Serialization & IR
 serde = { version = "1", features = ["derive"] }
@@ -52,9 +51,8 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Template engine for code generation
-tera = "1"
-heck = "0.5" # Case conversion utilities
+# Case conversion utilities for emitters
+heck = "0.5"
 
 # File watching (for dev mode)
 notify = "7"

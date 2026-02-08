@@ -109,6 +109,7 @@ impl Emitter for UnityEmitter {
             generate_runtime(&config.manifest)?,
             generate_native_bridge(&config.manifest)?,
             generate_asmdef(&config.manifest)?,
+            generate_tests(&config.manifest)?,
         ];
 
         Ok(files)
@@ -873,6 +874,41 @@ fn generate_asmdef(_manifest: &SchemaManifest) -> Result<GeneratedFile> {
 
     Ok(GeneratedFile {
         path: PathBuf::from("Motto.SDK.asmdef"),
+        content,
+    })
+}
+
+fn generate_tests(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+    let content = format!(
+        r#"using NUnit.Framework;
+
+namespace Motto.SDK.Tests
+{{
+    public class CodecTests
+    {{
+        [Test]
+        public void ProtocolVersionMatchesManifest()
+        {{
+            Assert.AreEqual(0x{:02X}, Protocol.VersionByte);
+        }}
+
+        [Test]
+        public void PacketBuilderWritesHeader()
+        {{
+            var builder = new PacketBuilder();
+            var data = builder.Build();
+
+            Assert.Greater(data.Length, 0);
+            Assert.AreEqual(Protocol.VersionByte, data[0]);
+        }}
+    }}
+}}
+"#,
+        manifest.meta.version_byte
+    );
+
+    Ok(GeneratedFile {
+        path: PathBuf::from("Runtime/Tests/CodecTests.cs"),
         content,
     })
 }

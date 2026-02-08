@@ -169,6 +169,7 @@ Motto follows a three-phase compiler architecture:
 - **Kotlin**: Android/JVM SDK with kotlinx.serialization support
 - **Unity/C#**: C# wrappers with unsafe pointers for memory-efficient DllImport
 - **Rust**: Native Rust crate with zero-copy codec and Handler trait for routing
+- **Implementation Style**: Emitters are written as native Rust generators (no template engine dependency)
 
 ## Deployment Philosophy: Scale From Small to Large
 
@@ -219,30 +220,41 @@ generated/
 │       ├── codec.ts      # Binary encoding/decoding
 │       ├── runtime.ts    # State machine, transport
 │       └── index.ts      # Exports
+│   └── tests/
+│       └── codec.test.ts # Generated smoke tests (vitest)
 ├── rust/
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs        # Types + Router enum + Handler trait
-│       └── codec.rs      # Encode/Decode implementations
+│       ├── codec.rs      # Encode/Decode implementations
+│       ├── tests.rs      # Generated roundtrip/router tests
+│       ├── transport.rs  # Shared transport abstractions
+│       ├── webtransport.rs # WebTransport client (WASM + native stub)
+│       └── websocket.rs  # WebSocket client (WASM + native stub)
 ├── swift/
 │   ├── Package.swift
 │   └── Sources/MottoSDK/
 │       ├── Types.swift
 │       ├── Codec.swift
 │       └── Runtime.swift
+│   └── Tests/MottoSDKTests/
+│       └── MottoSDKTests.swift
 ├── kotlin/
 │   ├── build.gradle.kts
 │   └── src/main/kotlin/io/motto/sdk/
 │       ├── Types.kt
 │       ├── Codec.kt
 │       └── Runtime.kt
+│   └── src/test/kotlin/io/motto/sdk/
+│       └── MottoSdkTests.kt
 └── unity/MottoSDK/
     ├── Motto.SDK.asmdef
     └── Runtime/
         ├── Types.cs
         ├── Codec.cs
         ├── Runtime.cs
-        └── NativeBridge.cs
+        ├── NativeBridge.cs
+        └── Tests/CodecTests.cs
 ```
 
 ## Using the Generated SDKs
@@ -623,6 +635,29 @@ public class GameClient : MonoBehaviour
 ```
 
 ## CI/CD Integration
+
+### For Motto (this repository)
+
+This project uses two GitHub Actions workflows:
+
+- **CI** (`.github/workflows/ci.yml`): runs on push/PR to `master` and checks format, clippy, build, and tests.
+- **Release** (`.github/workflows/release.yml`): runs on tag push `v*`, validates tag version against `Cargo.toml`, publishes to crates.io, then creates a GitHub release.
+
+Release flow:
+
+```bash
+# 1) bump Cargo.toml version, commit, push
+
+# 2) create release tag
+git tag v0.3.2
+git push origin v0.3.2
+```
+
+Required repository secret:
+
+- `CARGO_REGISTRY_TOKEN` (crates.io API token)
+
+### For generated SDK projects
 
 Automate SDK generation and publishing in your pipeline:
 

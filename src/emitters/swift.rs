@@ -86,6 +86,7 @@ impl Emitter for SwiftEmitter {
             generate_codec(&config.manifest)?,
             generate_runtime(&config.manifest)?,
             generate_package_swift(&config.manifest)?,
+            generate_tests(&config.manifest)?,
         ];
 
         Ok(files)
@@ -732,6 +733,32 @@ let package = Package(
 
     Ok(GeneratedFile {
         path: PathBuf::from("Package.swift"),
+        content,
+    })
+}
+
+fn generate_tests(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+    let content = format!(
+        r#"import XCTest
+@testable import MottoSDK
+
+final class MottoSDKTests: XCTestCase {{
+    func testProtocolVersionByte() throws {{
+        XCTAssertEqual(PROTOCOL_VERSION_BYTE, UInt8(0x{:02X}))
+    }}
+
+    func testPacketBuilderWritesHeader() throws {{
+        var builder = PacketBuilder()
+        let bytes = builder.build()
+        XCTAssertEqual(bytes.first, PROTOCOL_VERSION_BYTE)
+    }}
+}}
+"#,
+        manifest.meta.version_byte
+    );
+
+    Ok(GeneratedFile {
+        path: PathBuf::from("Tests/MottoSDKTests/MottoSDKTests.swift"),
         content,
     })
 }

@@ -21,14 +21,96 @@ jobs:
       - run: cargo check --all-features
 
   test:
-    name: Test
+    name: Test (${{ matrix.env }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - env: rust
+            features: ""
+            targets: rust
+          - env: typescript
+            features: emitter-typescript
+            targets: typescript
+          - env: swift
+            features: emitter-swift
+            targets: swift
+          - env: kotlin
+            features: emitter-kotlin
+            targets: kotlin
+          - env: unity
+            features: emitter-unity
+            targets: unity
+          - env: all
+            features: all-emitters
+            targets: all
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-features
-      - run: cargo test --all-features -- --ignored
+
+      - name: Run tests for environment
+        run: |
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo test --no-default-features --features "${{ matrix.features }}"
+            cargo test --no-default-features --features "${{ matrix.features }}" -- --ignored
+          else
+            cargo test --no-default-features
+            cargo test --no-default-features -- --ignored
+          fi
+
+      - name: Generate SDK for environment
+        env:
+          OUT_DIR: ${{ runner.temp }}/sdk-${{ matrix.env }}
+        run: |
+          rm -rf "${OUT_DIR}"
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo run --no-default-features --features "${{ matrix.features }}" -- \
+              generate --schema src/templates/example_schema.rs --output "${OUT_DIR}" --targets "${{ matrix.targets }}"
+          else
+            cargo run --no-default-features -- \
+              generate --schema src/templates/example_schema.rs --output "${OUT_DIR}" --targets "${{ matrix.targets }}"
+          fi
+
+      - name: Test generated Rust SDK (if present)
+        env:
+          OUT_DIR: ${{ runner.temp }}/sdk-${{ matrix.env }}
+        run: |
+          if [ -f "${OUT_DIR}/rust/Cargo.toml" ]; then
+            cargo test --manifest-path "${OUT_DIR}/rust/Cargo.toml"
+          else
+            echo "No generated Rust SDK for env=${{ matrix.env }}"
+          fi
+
+      - name: Verify generated test assets
+        env:
+          OUT_DIR: ${{ runner.temp }}/sdk-${{ matrix.env }}
+        run: |
+          case "${{ matrix.env }}" in
+            rust)
+              test -f "${OUT_DIR}/rust/src/tests.rs"
+              ;;
+            typescript)
+              test -f "${OUT_DIR}/typescript/tests/codec.test.ts"
+              ;;
+            swift)
+              test -f "${OUT_DIR}/swift/Tests/MottoSDKTests/MottoSDKTests.swift"
+              ;;
+            kotlin)
+              test -f "${OUT_DIR}/kotlin/src/test/kotlin/io/motto/sdk/MottoSdkTests.kt"
+              ;;
+            unity)
+              test -f "${OUT_DIR}/unity/MottoSDK/Runtime/Tests/CodecTests.cs"
+              ;;
+            all)
+              test -f "${OUT_DIR}/rust/src/tests.rs"
+              test -f "${OUT_DIR}/typescript/tests/codec.test.ts"
+              test -f "${OUT_DIR}/swift/Tests/MottoSDKTests/MottoSDKTests.swift"
+              test -f "${OUT_DIR}/kotlin/src/test/kotlin/io/motto/sdk/MottoSdkTests.kt"
+              test -f "${OUT_DIR}/unity/MottoSDK/Runtime/Tests/CodecTests.cs"
+              ;;
+          esac
 
   fmt:
     name: Format
