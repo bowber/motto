@@ -1,3 +1,10 @@
+#![cfg(any(
+    feature = "emitter-typescript",
+    feature = "emitter-swift",
+    feature = "emitter-kotlin",
+    feature = "emitter-unity"
+))]
+
 //! Integration tests for non-Rust emitters (TypeScript, Swift, Kotlin, Unity)
 //!
 //! These tests verify that each emitter generates the expected files
