@@ -14,7 +14,7 @@ name = "motto"
 path = "src/lib.rs"
 
 [[bin]]
-name = "motto-cli"
+name = "motto"
 path = "src/bin/cli.rs"
 
 [dependencies]

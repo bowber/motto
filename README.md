@@ -46,7 +46,7 @@ struct ChatMessage {
 ## Installation
 
 ```bash
-cargo install motto --bin motto-cli
+cargo install motto
 ```
 
 Or build from source:
@@ -62,7 +62,7 @@ cargo build --release
 ### 1. Initialize a project
 
 ```bash
-motto-cli init --path my-project
+motto init --path my-project
 ```
 
 This creates:
@@ -107,19 +107,19 @@ struct PlayerLeft {
 
 ```bash
 # Generate all platforms
-motto-cli generate
+motto generate
 
 # Generate specific platforms
-motto-cli generate --targets typescript,swift,rust
+motto generate --targets typescript,swift,rust
 
 # With WASM bindings
-motto-cli generate --wasm
+motto generate --wasm
 ```
 
 ### 4. Lock the schema version
 
 ```bash
-motto-cli lock --bump minor
+motto lock --bump minor
 ```
 
 ## Architecture
@@ -614,13 +614,13 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Install Motto CLI
-        run: cargo install motto --bin motto-cli
+        run: cargo install motto
       
       - name: Check for breaking changes
-        run: motto-cli check
+        run: motto check
       
       - name: Generate SDKs
-        run: motto-cli generate
+        run: motto generate
       
       - name: Publish TypeScript SDK
         run: |
