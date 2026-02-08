@@ -230,6 +230,7 @@ fn test_kotlin_emitter_generates_files() {
     assert!(paths.contains(&"src/main/kotlin/io/motto/sdk/Codec.kt".to_string()));
     assert!(paths.contains(&"src/main/kotlin/io/motto/sdk/Runtime.kt".to_string()));
     assert!(paths.contains(&"build.gradle.kts".to_string()));
+    assert!(paths.contains(&"settings.gradle.kts".to_string()));
     assert!(paths.contains(&"src/test/kotlin/io/motto/sdk/MottoSdkTests.kt".to_string()));
 }
 
@@ -290,6 +291,8 @@ fn test_unity_emitter_generates_files() {
     assert!(paths.contains(&"Runtime/Runtime.cs".to_string()));
     assert!(paths.contains(&"Runtime/NativeBridge.cs".to_string()));
     assert!(paths.contains(&"Motto.SDK.asmdef".to_string()));
+    assert!(paths.contains(&"Motto.SDK.csproj".to_string()));
+    assert!(paths.contains(&"Motto.SDK.Tests.csproj".to_string()));
     assert!(paths.contains(&"Runtime/Tests/CodecTests.cs".to_string()));
 }
 

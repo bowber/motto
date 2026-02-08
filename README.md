@@ -241,6 +241,7 @@ generated/
 │       └── MottoSDKTests.swift
 ├── kotlin/
 │   ├── build.gradle.kts
+│   ├── settings.gradle.kts
 │   └── src/main/kotlin/io/motto/sdk/
 │       ├── Types.kt
 │       ├── Codec.kt
@@ -249,6 +250,8 @@ generated/
 │       └── MottoSdkTests.kt
 └── unity/MottoSDK/
     ├── Motto.SDK.asmdef
+    ├── Motto.SDK.csproj
+    ├── Motto.SDK.Tests.csproj
     └── Runtime/
         ├── Types.cs
         ├── Codec.cs

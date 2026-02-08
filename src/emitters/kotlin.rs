@@ -59,6 +59,7 @@ impl Emitter for KotlinEmitter {
             generate_codec(&config.manifest)?,
             generate_runtime(&config.manifest)?,
             generate_build_gradle(&config.manifest)?,
+            generate_settings_gradle(&config.manifest)?,
             generate_tests(&config.manifest)?,
         ];
 
@@ -665,6 +666,15 @@ kotlin {{
 
     Ok(GeneratedFile {
         path: PathBuf::from("build.gradle.kts"),
+        content,
+    })
+}
+
+fn generate_settings_gradle(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+    let content = format!("rootProject.name = \"{}\"\n", manifest.meta.name);
+
+    Ok(GeneratedFile {
+        path: PathBuf::from("settings.gradle.kts"),
         content,
     })
 }

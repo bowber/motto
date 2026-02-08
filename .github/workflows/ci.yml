@@ -18,6 +18,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js
+        if: matrix.env == 'typescript' || matrix.env == 'all'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Java
+        if: matrix.env == 'kotlin' || matrix.env == 'all'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        if: matrix.env == 'kotlin' || matrix.env == 'all'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup .NET
+        if: matrix.env == 'unity' || matrix.env == 'all'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
       - run: cargo check --all-features
 
   test:
@@ -111,6 +134,39 @@ jobs:
               test -f "${OUT_DIR}/unity/MottoSDK/Runtime/Tests/CodecTests.cs"
               ;;
           esac
+
+      - name: Run generated TypeScript tests
+        if: matrix.env == 'typescript' || matrix.env == 'all'
+        env:
+          OUT_DIR: ${{ runner.temp }}/sdk-${{ matrix.env }}
+        run: |
+          cd "${OUT_DIR}/typescript"
+          npm install
+          npm test
+
+      - name: Run generated Swift tests
+        if: matrix.env == 'swift' || matrix.env == 'all'
+        env:
+          OUT_DIR: ${{ runner.temp }}/sdk-${{ matrix.env }}
+        run: |
+          cd "${OUT_DIR}/swift"
+          swift test
+
+      - name: Run generated Kotlin tests
+        if: matrix.env == 'kotlin' || matrix.env == 'all'
+        env:
+          OUT_DIR: ${{ runner.temp }}/sdk-${{ matrix.env }}
+        run: |
+          cd "${OUT_DIR}/kotlin"
+          gradle test --no-daemon
+
+      - name: Run generated Unity C# tests
+        if: matrix.env == 'unity' || matrix.env == 'all'
+        env:
+          OUT_DIR: ${{ runner.temp }}/sdk-${{ matrix.env }}
+        run: |
+          cd "${OUT_DIR}/unity/MottoSDK"
+          dotnet test Motto.SDK.Tests.csproj --configuration Release
 
   fmt:
     name: Format

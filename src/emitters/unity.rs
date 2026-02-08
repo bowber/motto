@@ -109,6 +109,8 @@ impl Emitter for UnityEmitter {
             generate_runtime(&config.manifest)?,
             generate_native_bridge(&config.manifest)?,
             generate_asmdef(&config.manifest)?,
+            generate_dotnet_sdk_project()?,
+            generate_dotnet_test_project()?,
             generate_tests(&config.manifest)?,
         ];
 
@@ -874,6 +876,61 @@ fn generate_asmdef(_manifest: &SchemaManifest) -> Result<GeneratedFile> {
 
     Ok(GeneratedFile {
         path: PathBuf::from("Motto.SDK.asmdef"),
+        content,
+    })
+}
+
+fn generate_dotnet_sdk_project() -> Result<GeneratedFile> {
+    let content = r#"<Project Sdk=\"Microsoft.NET.Sdk\">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include=\"Runtime/**/*.cs\" />
+    <Compile Remove=\"Runtime/Tests/**/*.cs\" />
+  </ItemGroup>
+</Project>
+"#
+    .to_string();
+
+    Ok(GeneratedFile {
+        path: PathBuf::from("Motto.SDK.csproj"),
+        content,
+    })
+}
+
+fn generate_dotnet_test_project() -> Result<GeneratedFile> {
+    let content = r#"<Project Sdk=\"Microsoft.NET.Sdk\">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include=\"Microsoft.NET.Test.Sdk\" Version=\"17.12.0\" />
+    <PackageReference Include=\"NUnit\" Version=\"3.14.0\" />
+    <PackageReference Include=\"NUnit3TestAdapter\" Version=\"4.6.0\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include=\"Motto.SDK.csproj\" />
+    <Compile Include=\"Runtime/Tests/**/*.cs\" />
+  </ItemGroup>
+</Project>
+"#
+    .to_string();
+
+    Ok(GeneratedFile {
+        path: PathBuf::from("Motto.SDK.Tests.csproj"),
         content,
     })
 }
