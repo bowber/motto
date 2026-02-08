@@ -147,10 +147,11 @@ fn generate_enum_type(e: &EnumManifest) -> String {
                 s.push_str(&format!("    /** {} */\n", docs));
             }
             let comma = if i < e.variants.len() - 1 { "," } else { ";" };
+            let discriminant = kotlin_enum_discriminant(&e.repr, v.discriminant);
             s.push_str(&format!(
                 "    {}({}){}\n",
                 v.name.to_uppercase(),
-                v.discriminant,
+                discriminant,
                 comma
             ));
         }
@@ -754,6 +755,16 @@ fn rust_to_kotlin_type(rust_type: &str) -> String {
             "()" => "Unit".to_string(),
             _ => rust_type.to_string(),
         }
+    }
+}
+
+fn kotlin_enum_discriminant(repr: &str, value: i64) -> String {
+    match repr {
+        "u8" => format!("{}u.toUByte()", value),
+        "u16" => format!("{}u.toUShort()", value),
+        "u32" => format!("{}u", value),
+        "u64" => format!("{}uL", value),
+        _ => value.to_string(),
     }
 }
 
