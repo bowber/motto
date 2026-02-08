@@ -881,7 +881,7 @@ fn generate_asmdef(_manifest: &SchemaManifest) -> Result<GeneratedFile> {
 }
 
 fn generate_dotnet_sdk_project() -> Result<GeneratedFile> {
-    let content = r#"<Project Sdk=\"Microsoft.NET.Sdk\">
+    let content = r#"<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -892,8 +892,8 @@ fn generate_dotnet_sdk_project() -> Result<GeneratedFile> {
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include=\"Runtime/**/*.cs\" />
-    <Compile Remove=\"Runtime/Tests/**/*.cs\" />
+    <Compile Include="Runtime/**/*.cs" />
+    <Compile Remove="Runtime/Tests/**/*.cs" />
   </ItemGroup>
 </Project>
 "#
@@ -906,7 +906,7 @@ fn generate_dotnet_sdk_project() -> Result<GeneratedFile> {
 }
 
 fn generate_dotnet_test_project() -> Result<GeneratedFile> {
-    let content = r#"<Project Sdk=\"Microsoft.NET.Sdk\">
+    let content = r#"<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -916,14 +916,14 @@ fn generate_dotnet_test_project() -> Result<GeneratedFile> {
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include=\"Microsoft.NET.Test.Sdk\" Version=\"17.12.0\" />
-    <PackageReference Include=\"NUnit\" Version=\"3.14.0\" />
-    <PackageReference Include=\"NUnit3TestAdapter\" Version=\"4.6.0\" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="NUnit" Version="3.14.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include=\"Motto.SDK.csproj\" />
-    <Compile Include=\"Runtime/Tests/**/*.cs\" />
+    <ProjectReference Include="Motto.SDK.csproj" />
+    <Compile Include="Runtime/Tests/**/*.cs" />
   </ItemGroup>
 </Project>
 "#

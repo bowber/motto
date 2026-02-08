@@ -35,6 +35,8 @@ jobs:
       - name: Setup Gradle
         if: matrix.env == 'kotlin' || matrix.env == 'all'
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
 
       - name: Setup .NET
         if: matrix.env == 'unity' || matrix.env == 'all'
@@ -135,37 +137,51 @@ jobs:
               ;;
           esac
 
+      - name: Generate native-toolchain fixture SDK
+        if: matrix.env == 'typescript' || matrix.env == 'swift' || matrix.env == 'kotlin' || matrix.env == 'unity' || matrix.env == 'all'
+        env:
+          OUT_NATIVE_DIR: ${{ runner.temp }}/sdk-native-${{ matrix.env }}
+        run: |
+          rm -rf "${OUT_NATIVE_DIR}"
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo run --no-default-features --features "${{ matrix.features }}" -- \
+              generate --schema src/templates/native_ci_schema.rs --output "${OUT_NATIVE_DIR}" --targets "${{ matrix.targets }}"
+          else
+            cargo run --no-default-features -- \
+              generate --schema src/templates/native_ci_schema.rs --output "${OUT_NATIVE_DIR}" --targets "${{ matrix.targets }}"
+          fi
+
       - name: Run generated TypeScript tests
         if: matrix.env == 'typescript' || matrix.env == 'all'
         env:
-          OUT_DIR: ${{ runner.temp }}/sdk-${{ matrix.env }}
+          OUT_NATIVE_DIR: ${{ runner.temp }}/sdk-native-${{ matrix.env }}
         run: |
-          cd "${OUT_DIR}/typescript"
+          cd "${OUT_NATIVE_DIR}/typescript"
           npm install
           npm test
 
       - name: Run generated Swift tests
         if: matrix.env == 'swift' || matrix.env == 'all'
         env:
-          OUT_DIR: ${{ runner.temp }}/sdk-${{ matrix.env }}
+          OUT_NATIVE_DIR: ${{ runner.temp }}/sdk-native-${{ matrix.env }}
         run: |
-          cd "${OUT_DIR}/swift"
+          cd "${OUT_NATIVE_DIR}/swift"
           swift test
 
       - name: Run generated Kotlin tests
         if: matrix.env == 'kotlin' || matrix.env == 'all'
         env:
-          OUT_DIR: ${{ runner.temp }}/sdk-${{ matrix.env }}
+          OUT_NATIVE_DIR: ${{ runner.temp }}/sdk-native-${{ matrix.env }}
         run: |
-          cd "${OUT_DIR}/kotlin"
+          cd "${OUT_NATIVE_DIR}/kotlin"
           gradle test --no-daemon
 
       - name: Run generated Unity C# tests
         if: matrix.env == 'unity' || matrix.env == 'all'
         env:
-          OUT_DIR: ${{ runner.temp }}/sdk-${{ matrix.env }}
+          OUT_NATIVE_DIR: ${{ runner.temp }}/sdk-native-${{ matrix.env }}
         run: |
-          cd "${OUT_DIR}/unity/MottoSDK"
+          cd "${OUT_NATIVE_DIR}/unity/MottoSDK"
           dotnet test Motto.SDK.Tests.csproj --configuration Release
 
   fmt:
