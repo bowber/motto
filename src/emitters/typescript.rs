@@ -1006,27 +1006,43 @@ export class MottoTransport {{
 }}"#
         }
         TransportMode::Runtime => {
-            r#"/** WebTransport connection wrapper */
-export class MottoTransport {{
-  private transport: WebTransport | null = null;
+            r#"export type TransportKind = 'webtransport' | 'websocket';
+
+export function transportKindForUrl(url: string): TransportKind {{
+  if (url.startsWith('ws://') || url.startsWith('wss://')) return 'websocket';
+  if (url.startsWith('https://')) return 'webtransport';
+  throw new Error(`Unsupported transport URL scheme: ${{url}}`);
+}}
+
+interface MottoDatagramTransport {{
+  connect(): Promise<void>;
+  reconnect(): Promise<void>;
+  sendDatagram(data: Uint8Array): Promise<void>;
+  receiveDatagram(): AsyncGenerator<Uint8Array>;
+  getState(): ConnectionState;
+  close(): Promise<void>;
+}}
+
+export class MottoWebTransport implements MottoDatagramTransport {{
+  private transport: any | null = null;
   private state: ConnectionState = ConnectionState.Disconnected;
-  private retryAttempt: number = 0;
-  private retryConfig: RetryConfig;
+  private retryAttempt = 0;
 
   constructor(
-    private url: string,
-    retryConfig: RetryConfig = DEFAULT_RETRY_CONFIG
-  ) {{
-    this.retryConfig = retryConfig;
-  }}
+    private readonly url: string,
+    private readonly retryConfig: RetryConfig = DEFAULT_RETRY_CONFIG,
+  ) {{}}
 
   async connect(): Promise<void> {{
     if (this.state === ConnectionState.Connected) return;
-
     this.state = ConnectionState.Connecting;
-    
+
     try {{
-      this.transport = new WebTransport(this.url);
+      const WebTransportCtor = (globalThis as any).WebTransport;
+      if (!WebTransportCtor) {{
+        throw new Error('WebTransport is unavailable in this runtime');
+      }}
+      this.transport = new WebTransportCtor(this.url);
       await this.transport.ready;
       this.state = ConnectionState.Connected;
       this.retryAttempt = 0;
@@ -1040,12 +1056,10 @@ export class MottoTransport {{
     if (this.retryAttempt >= this.retryConfig.maxRetries) {{
       throw new Error('Max retry attempts exceeded');
     }}
-
     this.state = ConnectionState.Reconnecting;
-    const delay = calculateRetryDelay(this.retryAttempt, this.retryConfig);
-    this.retryAttempt++;
-
-    await new Promise(resolve => setTimeout(resolve, delay));
+    const delayMs = calculateRetryDelay(this.retryAttempt, this.retryConfig);
+    this.retryAttempt += 1;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
     await this.connect();
   }}
 
@@ -1053,10 +1067,12 @@ export class MottoTransport {{
     if (!this.transport || this.state !== ConnectionState.Connected) {{
       throw new Error('Not connected');
     }}
-
     const writer = this.transport.datagrams.writable.getWriter();
-    await writer.write(data);
-    writer.releaseLock();
+    try {{
+      await writer.write(data);
+    }} finally {{
+      writer.releaseLock();
+    }}
   }}
 
   async *receiveDatagram(): AsyncGenerator<Uint8Array> {{
@@ -1069,7 +1085,7 @@ export class MottoTransport {{
       while (true) {{
         const {{ value, done }} = await reader.read();
         if (done) break;
-        yield value;
+        if (value) yield value;
       }}
     }} finally {{
       reader.releaseLock();
@@ -1087,7 +1103,159 @@ export class MottoTransport {{
     }}
     this.state = ConnectionState.Disconnected;
   }}
-}}"#
+}}
+
+export class MottoWebSocket implements MottoDatagramTransport {{
+  private socket: any | null = null;
+  private state: ConnectionState = ConnectionState.Disconnected;
+  private retryAttempt = 0;
+  private recvQueue: Uint8Array[] = [];
+  private recvResolvers: Array<(value: Uint8Array | null) => void> = [];
+
+  constructor(
+    private readonly url: string,
+    private readonly retryConfig: RetryConfig = DEFAULT_RETRY_CONFIG,
+  ) {{}}
+
+  async connect(): Promise<void> {{
+    if (this.state === ConnectionState.Connected) return;
+    this.state = ConnectionState.Connecting;
+
+    const WebSocketCtor = (globalThis as any).WebSocket;
+    if (!WebSocketCtor) {{
+      this.state = ConnectionState.Error;
+      throw new Error('WebSocket is unavailable in this runtime');
+    }}
+
+    await new Promise<void>((resolve, reject) => {{
+      const socket = new WebSocketCtor(this.url);
+      socket.binaryType = 'arraybuffer';
+
+      const onOpen = () => {{
+        cleanup();
+        this.socket = socket;
+        this.state = ConnectionState.Connected;
+        this.retryAttempt = 0;
+        resolve();
+      }};
+
+      const onError = () => {{
+        cleanup();
+        this.state = ConnectionState.Error;
+        reject(new Error('WebSocket connection failed'));
+      }};
+
+      const onClose = () => {{
+        this.state = ConnectionState.Disconnected;
+        this.socket = null;
+        while (this.recvResolvers.length > 0) {{
+          const resolveNext = this.recvResolvers.shift();
+          if (resolveNext) resolveNext(null);
+        }}
+      }};
+
+      const onMessage = (event: any) => {{
+        const data = event.data;
+        if (typeof data === 'string') return;
+        const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+        const waiter = this.recvResolvers.shift();
+        if (waiter) waiter(bytes);
+        else this.recvQueue.push(bytes);
+      }};
+
+      const cleanup = () => {{
+        socket.removeEventListener('open', onOpen);
+        socket.removeEventListener('error', onError);
+      }};
+
+      socket.addEventListener('open', onOpen, {{ once: true }});
+      socket.addEventListener('error', onError, {{ once: true }});
+      socket.addEventListener('close', onClose);
+      socket.addEventListener('message', onMessage);
+    }});
+  }}
+
+  async reconnect(): Promise<void> {{
+    if (this.retryAttempt >= this.retryConfig.maxRetries) {{
+      throw new Error('Max retry attempts exceeded');
+    }}
+    this.state = ConnectionState.Reconnecting;
+    const delayMs = calculateRetryDelay(this.retryAttempt, this.retryConfig);
+    this.retryAttempt += 1;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await this.connect();
+  }}
+
+  async sendDatagram(data: Uint8Array): Promise<void> {{
+    if (!this.socket || this.state !== ConnectionState.Connected) {{
+      throw new Error('Not connected');
+    }}
+    this.socket.send(data);
+  }}
+
+  async *receiveDatagram(): AsyncGenerator<Uint8Array> {{
+    while (this.state === ConnectionState.Connected || this.recvQueue.length > 0) {{
+      if (this.recvQueue.length > 0) {{
+        yield this.recvQueue.shift()!;
+        continue;
+      }}
+
+      const data = await new Promise<Uint8Array | null>((resolve) => {{
+        this.recvResolvers.push(resolve);
+      }});
+
+      if (!data) break;
+      yield data;
+    }}
+  }}
+
+  getState(): ConnectionState {{
+    return this.state;
+  }}
+
+  async close(): Promise<void> {{
+    if (this.socket) {{
+      this.socket.close();
+      this.socket = null;
+    }}
+    this.state = ConnectionState.Disconnected;
+  }}
+}}
+
+export class MottoTransport implements MottoDatagramTransport {{
+  private readonly inner: MottoDatagramTransport;
+
+  constructor(url: string, retryConfig: RetryConfig = DEFAULT_RETRY_CONFIG) {{
+    const kind = transportKindForUrl(url);
+    this.inner = kind === 'webtransport'
+      ? new MottoWebTransport(url, retryConfig)
+      : new MottoWebSocket(url, retryConfig);
+  }}
+
+  connect(): Promise<void> {{
+    return this.inner.connect();
+  }}
+
+  reconnect(): Promise<void> {{
+    return this.inner.reconnect();
+  }}
+
+  sendDatagram(data: Uint8Array): Promise<void> {{
+    return this.inner.sendDatagram(data);
+  }}
+
+  receiveDatagram(): AsyncGenerator<Uint8Array> {{
+    return this.inner.receiveDatagram();
+  }}
+
+  getState(): ConnectionState {{
+    return this.inner.getState();
+  }}
+
+  close(): Promise<void> {{
+    return this.inner.close();
+  }}
+}"#
         }
     };
 
@@ -1322,6 +1490,7 @@ fn generate_tests(manifest: &SchemaManifest) -> Result<GeneratedFile> {
     let content = format!(
         r#"import {{ describe, expect, it }} from "vitest";
 import {{ PacketBuilder, PacketView, PROTOCOL_VERSION_BYTE }} from "../src/codec";
+import {{ transportKindForUrl, ConnectionState, MottoTransport }} from "../src/runtime";
 
 describe("codec smoke tests", () => {{
   it("writes and reads the version header", () => {{
@@ -1335,6 +1504,24 @@ describe("codec smoke tests", () => {{
 
   it("pins generated protocol version", () => {{
     expect(PROTOCOL_VERSION_BYTE).toBe({});
+  }});
+
+  it("selects websocket transport for ws/wss URLs", () => {{
+    expect(transportKindForUrl("ws://localhost:9001")).toBe("websocket");
+    expect(transportKindForUrl("wss://example.com/ws")).toBe("websocket");
+  }});
+
+  it("selects webtransport for https URLs", () => {{
+    expect(transportKindForUrl("https://example.com:4433")).toBe("webtransport");
+  }});
+
+  it("throws for unsupported transport schemes", () => {{
+    expect(() => transportKindForUrl("http://example.com")).toThrow();
+  }});
+
+  it("starts disconnected before connect", () => {{
+    const transport = new MottoTransport("ws://localhost:9001");
+    expect(transport.getState()).toBe(ConnectionState.Disconnected);
   }});
 }});
 "#,

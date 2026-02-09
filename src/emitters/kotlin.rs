@@ -639,54 +639,117 @@ class MottoWebSocketTransport(
     private val url: String,
     private val retryConfig: RetryConfig = RetryConfig()
 ) : MottoTransport {{
-    
+
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val state: StateFlow<ConnectionState> = _state.asStateFlow()
-    
+
     private var retryAttempt = 0
-    
+    private var socket: java.net.http.WebSocket? = null
+    private val incoming = kotlinx.coroutines.channels.Channel<ByteArray>(
+        kotlinx.coroutines.channels.Channel.BUFFERED
+    )
+
     override suspend fun connect() {{
+        if (_state.value == ConnectionState.CONNECTED) return
+
+        val uri = java.net.URI(url)
+        if (uri.scheme != "ws" && uri.scheme != "wss") {{
+            _state.value = ConnectionState.ERROR
+            throw IOException("MottoWebSocketTransport requires ws:// or wss:// URL")
+        }}
+
         _state.value = ConnectionState.CONNECTING
-        
+
         try {{
-            // TODO: Implement actual WebSocket/WebTransport connection
-            // This is a placeholder
+            val client = java.net.http.HttpClient.newBuilder().build()
+            val listener = object : java.net.http.WebSocket.Listener {{
+                override fun onOpen(webSocket: java.net.http.WebSocket) {{
+                    _state.value = ConnectionState.CONNECTED
+                    retryAttempt = 0
+                    webSocket.request(1)
+                }}
+
+                override fun onBinary(
+                    webSocket: java.net.http.WebSocket,
+                    data: java.nio.ByteBuffer,
+                    last: Boolean
+                ): java.util.concurrent.CompletionStage<*> {{
+                    val bytes = ByteArray(data.remaining())
+                    data.get(bytes)
+                    incoming.trySend(bytes)
+                    webSocket.request(1)
+                    return java.util.concurrent.CompletableFuture.completedFuture(null)
+                }}
+
+                override fun onClose(
+                    webSocket: java.net.http.WebSocket,
+                    statusCode: Int,
+                    reason: String
+                ): java.util.concurrent.CompletionStage<*> {{
+                    _state.value = ConnectionState.DISCONNECTED
+                    return java.util.concurrent.CompletableFuture.completedFuture(null)
+                }}
+
+                override fun onError(webSocket: java.net.http.WebSocket, error: Throwable) {{
+                    _state.value = ConnectionState.ERROR
+                }}
+            }}
+
+            val opened = withContext(Dispatchers.IO) {{
+                client.newWebSocketBuilder().buildAsync(uri, listener).get()
+            }}
+            socket = opened
             _state.value = ConnectionState.CONNECTED
             retryAttempt = 0
         }} catch (e: IOException) {{
             _state.value = ConnectionState.ERROR
             throw e
+        }} catch (e: Exception) {{
+            _state.value = ConnectionState.ERROR
+            throw IOException("Failed to connect: ${{e.message}}", e)
         }}
     }}
-    
+
     suspend fun reconnect() {{
         if (retryAttempt >= retryConfig.maxRetries) {{
             throw IOException("Max retry attempts exceeded")
         }}
-        
+
         _state.value = ConnectionState.RECONNECTING
-        val delay = calculateRetryDelay(retryAttempt, retryConfig)
+        val backoffDelay = calculateRetryDelay(retryAttempt, retryConfig)
         retryAttempt++
-        
-        delay(delay)
+
+        delay(backoffDelay)
         connect()
     }}
-    
+
     override suspend fun disconnect() {{
-        // TODO: Close connection
+        val ws = socket
+        if (ws != null) {{
+            withContext(Dispatchers.IO) {{
+                ws.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "disconnect").join()
+            }}
+            socket = null
+        }}
         _state.value = ConnectionState.DISCONNECTED
     }}
-    
+
     override suspend fun send(data: ByteArray) {{
         if (_state.value != ConnectionState.CONNECTED) {{
             throw IOException("Not connected")
         }}
-        // TODO: Send data
+        val ws = socket ?: throw IOException("Not connected")
+        try {{
+            withContext(Dispatchers.IO) {{
+                ws.sendBinary(java.nio.ByteBuffer.wrap(data), true).join()
+            }}
+        }} catch (e: Exception) {{
+            _state.value = ConnectionState.ERROR
+            throw IOException("Send failed: ${{e.message}}", e)
+        }}
     }}
-    
-    override fun receive(): Flow<ByteArray> = flow {{
-        // TODO: Receive data
-    }}
+
+    override fun receive(): Flow<ByteArray> = incoming.receiveAsFlow()
 }}
 {}
 "#,
@@ -756,7 +819,9 @@ fn generate_tests(manifest: &SchemaManifest) -> Result<GeneratedFile> {
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 
 class MottoSdkTests {{
     @Test
@@ -772,6 +837,20 @@ class MottoSdkTests {{
 
         assertEquals(PROTOCOL_VERSION_BYTE, data[0])
         assertTrue(reader.validateVersion())
+    }}
+
+    @Test
+    fun transportStartsDisconnected() {{
+        val transport = MottoWebSocketTransport("ws://localhost:19001")
+        assertEquals(ConnectionState.DISCONNECTED, transport.state.value)
+    }}
+
+    @Test
+    fun transportRejectsUnsupportedUrlScheme() = runBlocking {{
+        val transport = MottoWebSocketTransport("https://example.com")
+        assertFailsWith<java.io.IOException> {{
+            transport.connect()
+        }}
     }}
 }}
 "#,

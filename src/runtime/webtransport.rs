@@ -25,6 +25,8 @@ pub struct WebTransportClient {
     state: Arc<RwLock<StateMachine>>,
     outgoing_tx: Option<mpsc::Sender<Vec<u8>>>,
     incoming_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    #[cfg(test)]
+    test_server_hash: Option<wtransport::tls::Sha256Digest>,
     /// Handle to the background connection task so we can abort on disconnect
     task_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -37,6 +39,23 @@ impl WebTransportClient {
             state: Arc::new(RwLock::new(StateMachine::new(config.retry))),
             outgoing_tx: None,
             incoming_rx: None,
+            #[cfg(test)]
+            test_server_hash: None,
+            task_handle: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_test_hash(
+        config: TransportConfig,
+        test_server_hash: wtransport::tls::Sha256Digest,
+    ) -> Self {
+        Self {
+            config: config.clone(),
+            state: Arc::new(RwLock::new(StateMachine::new(config.retry))),
+            outgoing_tx: None,
+            incoming_rx: None,
+            test_server_hash: Some(test_server_hash),
             task_handle: None,
         }
     }
@@ -76,7 +95,21 @@ impl WebTransportClient {
                 .map_err(|_| TransportError::InvalidState)?;
         }
 
-        // Build client config with dangerous self-signed cert support for dev
+        // Build client config
+        // In tests we use no-cert-validation so an in-process self-signed fixture can run.
+        #[cfg(test)]
+        let client_config = {
+            let builder = wtransport::ClientConfig::builder().with_bind_default();
+            if let Some(hash) = &self.test_server_hash {
+                builder
+                    .with_server_certificate_hashes([hash.clone()])
+                    .build()
+            } else {
+                builder.with_native_certs().build()
+            }
+        };
+
+        #[cfg(not(test))]
         let client_config = wtransport::ClientConfig::default();
 
         // Create endpoint and connect with timeout
@@ -258,6 +291,7 @@ mod tests {
     use super::*;
     use crate::runtime::state::RetryConfig;
     use pretty_assertions::assert_eq;
+    use std::time::Duration;
 
     fn test_config(url: &str) -> TransportConfig {
         TransportConfig {
@@ -357,19 +391,59 @@ mod tests {
         assert!(matches!(result, Err(TransportError::PacketTooLarge { .. })));
     }
 
-    // Integration tests that require a real QUIC server are ignored
     #[tokio::test]
-    #[ignore]
-    async fn test_connect_to_real_server() {
-        let mut client = WebTransportClient::new(test_config("https://localhost:4433"));
-        let result = client.connect().await;
-        if result.is_err() {
-            // This test is intended for local/manual runs against a real QUIC server.
-            // CI runs ignored tests too, but doesn't provide a WebTransport endpoint.
-            return;
-        }
+    async fn test_connect_to_inprocess_server() {
+        let identity = wtransport::Identity::self_signed(["localhost", "127.0.0.1", "::1"])
+            .expect("failed to build self-signed identity for test server");
+        let cert_hash = identity.certificate_chain().as_slice()[0].hash();
+        let server_config = wtransport::ServerConfig::builder()
+            .with_bind_default(0)
+            .with_identity(identity)
+            .build();
+        let server = wtransport::Endpoint::server(server_config)
+            .expect("failed to start in-process WebTransport server");
+        let server_port = server
+            .local_addr()
+            .expect("failed to read server local addr")
+            .port();
+
+        let server_task = tokio::spawn(async move {
+            let incoming = server.accept().await;
+            if let Ok(request) = incoming.await {
+                if let Ok(connection) = request.accept().await {
+                    // Echo exactly one datagram back to the client.
+                    if let Ok(datagram) = connection.receive_datagram().await {
+                        let _ = connection.send_datagram(datagram.payload());
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            }
+        });
+
+        let mut client = WebTransportClient::new_with_test_hash(
+            test_config(&format!("https://localhost:{}", server_port)),
+            cert_hash,
+        );
+        client
+            .connect()
+            .await
+            .expect("client should connect to in-process server");
         assert!(client.is_connected().await);
+
+        let packet = vec![PROTOCOL_VERSION, 0xAA, 0xBB, 0xCC];
+        client
+            .send(packet.clone())
+            .await
+            .expect("send should succeed");
+        let echoed = tokio::time::timeout(Duration::from_secs(5), client.receive())
+            .await
+            .expect("timed out waiting for echoed datagram")
+            .expect("receive should succeed");
+        assert_eq!(echoed, packet);
+
         client.disconnect().await;
         assert_eq!(client.state().await, ConnectionState::Disconnected);
+
+        server_task.abort();
     }
 }

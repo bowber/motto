@@ -889,7 +889,7 @@ protocol_version = {version_byte}
 {default_features}
 core = []
 webtransport = ["core", "dep:tokio", "dep:wtransport"]
-websocket = ["core", "dep:tokio", "dep:tokio-tungstenite"]
+websocket = ["core", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
 ffi-transport = ["core", "dep:libloading"]
 
 # WASM features (automatically enabled by target)
@@ -906,6 +906,9 @@ wtransport = {{ version = "0.6", optional = true }}
 
 # Native WebSocket
 tokio-tungstenite = {{ version = "0.24", optional = true }}
+
+# Async utilities for stream/sink combinators
+futures-util = {{ version = "0.3", optional = true }}
 
 # FFI transport (shared Rust transport core via C ABI)
 libloading = {{ version = "0.8", optional = true }}
@@ -1077,6 +1080,54 @@ use super::codec::{Encode, Decode};
 
     // Generate version byte tests
     content.push_str(&generate_version_tests(manifest));
+
+    // Generate transport smoke tests to keep websocket/webtransport paths
+    // exercised in generated SDKs without requiring external servers.
+    content.push_str(
+        r#"
+// ============================================================================
+// Transport Smoke Tests
+// ============================================================================
+
+#[cfg(all(not(feature = "ffi-transport"), feature = "websocket", not(target_arch = "wasm32")))]
+#[tokio::test]
+async fn websocket_client_starts_disconnected() {
+    let cfg = TransportConfig::new("ws://localhost:18080");
+    let client = WebSocketClient::new(cfg);
+    assert_eq!(client.state().await, ConnectionState::Disconnected);
+}
+
+#[cfg(all(not(feature = "ffi-transport"), feature = "websocket", not(target_arch = "wasm32")))]
+#[tokio::test]
+async fn websocket_connect_errors_without_server() {
+    let cfg = TransportConfig::new("ws://localhost:18080");
+    let err = match WebSocketClient::connect(cfg).await {
+        Ok(_) => panic!("expected websocket connect to fail without a listening server"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, TransportError::ConnectionFailed(_) | TransportError::Timeout));
+}
+
+#[cfg(all(not(feature = "ffi-transport"), feature = "webtransport", not(target_arch = "wasm32")))]
+#[tokio::test]
+async fn webtransport_client_starts_disconnected() {
+    let cfg = TransportConfig::new("https://localhost:4433");
+    let client = WebTransportClient::new(cfg);
+    assert_eq!(client.state().await, ConnectionState::Disconnected);
+}
+
+#[cfg(all(not(feature = "ffi-transport"), feature = "webtransport", not(target_arch = "wasm32")))]
+#[tokio::test]
+async fn webtransport_connect_errors_without_server() {
+    let cfg = TransportConfig::new("https://localhost:4433");
+    let err = match WebTransportClient::connect(cfg).await {
+        Ok(_) => panic!("expected webtransport connect to fail without a listening server"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, TransportError::ConnectionFailed(_) | TransportError::Timeout));
+}
+"#,
+    );
 
     Ok(GeneratedFile {
         path: PathBuf::from("src/tests.rs"),
@@ -1412,14 +1463,15 @@ pub use native::WebTransportClient;
 mod native {
     use super::*;
     use std::sync::Arc;
-    use tokio::sync::RwLock;
+    use tokio::sync::{mpsc, Mutex, RwLock};
 
     /// WebTransport client for native platforms
     pub struct WebTransportClient {
         config: TransportConfig,
         state: Arc<RwLock<ConnectionState>>,
-        // Connection handle would be stored here
-        // connection: Option<wtransport::Connection>,
+        outgoing_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
+        incoming_rx: Arc<Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
+        task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     }
 
     impl WebTransportClient {
@@ -1428,6 +1480,9 @@ mod native {
             Self {
                 config,
                 state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+                outgoing_tx: Arc::new(Mutex::new(None)),
+                incoming_rx: Arc::new(Mutex::new(None)),
+                task_handle: Arc::new(Mutex::new(None)),
             }
         }
 
@@ -1440,24 +1495,60 @@ mod native {
 
         async fn do_connect(&self) -> Result<(), TransportError> {
             *self.state.write().await = ConnectionState::Connecting;
-            
-            // Native WebTransport is not yet implemented.
-            // Add `wtransport` to your Cargo.toml and implement the connection logic here.
-            // See https://docs.rs/wtransport for the client API.
-            //
-            // Example:
-            // let endpoint = wtransport::Endpoint::client(
-            //     wtransport::ClientConfig::builder()
-            //         .with_bind_default()
-            //         .with_no_cert_validation()
-            //         .build()
-            // )?;
-            // let connection = endpoint.connect(&self.config.url).await?;
-            
-            *self.state.write().await = ConnectionState::Disconnected;
-            Err(TransportError::ConnectionFailed(
-                "Native WebTransport not yet implemented. Add `wtransport` crate and implement do_connect().".into()
-            ))
+
+            if !self.config.url.starts_with("https://") {
+                *self.state.write().await = ConnectionState::Disconnected;
+                return Err(TransportError::ConnectionFailed(
+                    "WebTransport requires an https:// URL".into(),
+                ));
+            }
+
+            let endpoint = wtransport::Endpoint::client(wtransport::ClientConfig::default())
+                .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
+
+            let timeout = tokio::time::Duration::from_millis(self.config.connect_timeout_ms);
+            let connection = tokio::time::timeout(timeout, endpoint.connect(&self.config.url))
+                .await
+                .map_err(|_| TransportError::Timeout)?
+                .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
+
+            let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<Vec<u8>>(256);
+            let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(256);
+
+            {
+                *self.outgoing_tx.lock().await = Some(outgoing_tx);
+                *self.incoming_rx.lock().await = Some(incoming_rx);
+            }
+
+            *self.state.write().await = ConnectionState::Connected;
+
+            let state = Arc::clone(&self.state);
+            let handle = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        Some(data) = outgoing_rx.recv() => {
+                            if connection.send_datagram(data).is_err() {
+                                break;
+                            }
+                        }
+                        result = connection.receive_datagram() => {
+                            match result {
+                                Ok(datagram) => {
+                                    if incoming_tx.send(datagram.payload().to_vec()).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                }
+
+                *state.write().await = ConnectionState::Disconnected;
+            });
+
+            *self.task_handle.lock().await = Some(handle);
+            Ok(())
         }
 
         /// Send an encodable message
@@ -1481,12 +1572,17 @@ mod native {
                 return Err(TransportError::Disconnected);
             }
 
-            // Native WebTransport send not yet implemented.
-            // self.connection.send_datagram(data).await?;
-            let _ = data;
-            Err(TransportError::SendFailed(
-                "Native WebTransport send not yet implemented.".into()
-            ))
+            let tx = self
+                .outgoing_tx
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or(TransportError::Disconnected)?;
+
+            tx.send(data.to_vec())
+                .await
+                .map_err(|e| TransportError::SendFailed(e.to_string()))
         }
 
         /// Receive and decode a message
@@ -1515,17 +1611,25 @@ mod native {
                 return Err(TransportError::Disconnected);
             }
 
-            // Native WebTransport recv not yet implemented.
-            // let data = self.connection.receive_datagram().await?;
-            Err(TransportError::ReceiveFailed(
-                "Native WebTransport recv not yet implemented.".into()
-            ))
+            let mut guard = self.incoming_rx.lock().await;
+            let rx = guard.as_mut().ok_or(TransportError::Disconnected)?;
+            rx.recv()
+                .await
+                .ok_or_else(|| TransportError::ReceiveFailed("Connection closed".into()))
         }
 
         /// Close the connection
         pub async fn close(&self) -> Result<(), TransportError> {
+            {
+                let mut handle = self.task_handle.lock().await;
+                if let Some(task) = handle.take() {
+                    task.abort();
+                }
+            }
+
+            *self.outgoing_tx.lock().await = None;
+            *self.incoming_rx.lock().await = None;
             *self.state.write().await = ConnectionState::Disconnected;
-            // TODO: Close wtransport connection
             Ok(())
         }
 
@@ -1881,15 +1985,18 @@ pub use native::WebSocketClient;
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
     use std::sync::Arc;
-    use tokio::sync::RwLock;
+    use tokio::sync::{mpsc, Mutex, RwLock};
+    use tokio_tungstenite::tungstenite::Message;
 
     /// WebSocket client for native platforms
     pub struct WebSocketClient {
         config: TransportConfig,
         state: Arc<RwLock<ConnectionState>>,
-        // WebSocket connection would be stored here
-        // ws: Option<tokio_tungstenite::WebSocketStream<...>>,
+        outgoing_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
+        incoming_rx: Arc<Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
+        task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     }
 
     impl WebSocketClient {
@@ -1898,6 +2005,9 @@ mod native {
             Self {
                 config,
                 state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+                outgoing_tx: Arc::new(Mutex::new(None)),
+                incoming_rx: Arc::new(Mutex::new(None)),
+                task_handle: Arc::new(Mutex::new(None)),
             }
         }
 
@@ -1910,20 +2020,63 @@ mod native {
 
         async fn do_connect(&self) -> Result<(), TransportError> {
             *self.state.write().await = ConnectionState::Connecting;
-            
-            // Native WebSocket is not yet implemented.
-            // Add `tokio-tungstenite` to your Cargo.toml and implement the connection logic here.
-            // See https://docs.rs/tokio-tungstenite for the client API.
-            //
-            // Example:
-            // let (ws_stream, _) = tokio_tungstenite::connect_async(&self.config.url)
-            //     .await
-            //     .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
-            
-            *self.state.write().await = ConnectionState::Disconnected;
-            Err(TransportError::ConnectionFailed(
-                "Native WebSocket not yet implemented. Add `tokio-tungstenite` crate and implement do_connect().".into()
-            ))
+
+            if !(self.config.url.starts_with("ws://") || self.config.url.starts_with("wss://")) {
+                *self.state.write().await = ConnectionState::Disconnected;
+                return Err(TransportError::ConnectionFailed(
+                    "WebSocket requires a ws:// or wss:// URL".into(),
+                ));
+            }
+
+            let timeout = tokio::time::Duration::from_millis(self.config.connect_timeout_ms);
+            let (ws_stream, _) = tokio::time::timeout(
+                timeout,
+                tokio_tungstenite::connect_async(&self.config.url),
+            )
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
+
+            let (mut ws_sink, mut ws_source) = ws_stream.split();
+            let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<Vec<u8>>(256);
+            let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(256);
+
+            {
+                *self.outgoing_tx.lock().await = Some(outgoing_tx);
+                *self.incoming_rx.lock().await = Some(incoming_rx);
+            }
+
+            *self.state.write().await = ConnectionState::Connected;
+
+            let state = Arc::clone(&self.state);
+            let handle = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        Some(data) = outgoing_rx.recv() => {
+                            if ws_sink.send(Message::Binary(data.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        msg = ws_source.next() => {
+                            match msg {
+                                Some(Ok(Message::Binary(data))) => {
+                                    if incoming_tx.send(data.to_vec()).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Some(Ok(Message::Close(_))) => break,
+                                Some(Ok(_)) => {}
+                                Some(Err(_)) | None => break,
+                            }
+                        }
+                    }
+                }
+
+                *state.write().await = ConnectionState::Disconnected;
+            });
+
+            *self.task_handle.lock().await = Some(handle);
+            Ok(())
         }
 
         /// Send an encodable message
@@ -1947,13 +2100,17 @@ mod native {
                 return Err(TransportError::Disconnected);
             }
 
-            // Native WebSocket send not yet implemented.
-            // use tokio_tungstenite::tungstenite::Message;
-            // self.ws.send(Message::Binary(data.to_vec())).await?;
-            let _ = data;
-            Err(TransportError::SendFailed(
-                "Native WebSocket send not yet implemented.".into()
-            ))
+            let tx = self
+                .outgoing_tx
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or(TransportError::Disconnected)?;
+
+            tx.send(data.to_vec())
+                .await
+                .map_err(|e| TransportError::SendFailed(e.to_string()))
         }
 
         /// Receive and decode a message
@@ -1982,16 +2139,25 @@ mod native {
                 return Err(TransportError::Disconnected);
             }
 
-            // Native WebSocket recv not yet implemented.
-            Err(TransportError::ReceiveFailed(
-                "Native WebSocket recv not yet implemented.".into()
-            ))
+            let mut guard = self.incoming_rx.lock().await;
+            let rx = guard.as_mut().ok_or(TransportError::Disconnected)?;
+            rx.recv()
+                .await
+                .ok_or_else(|| TransportError::ReceiveFailed("Connection closed".into()))
         }
 
         /// Close the connection
         pub async fn close(&self) -> Result<(), TransportError> {
+            {
+                let mut handle = self.task_handle.lock().await;
+                if let Some(task) = handle.take() {
+                    task.abort();
+                }
+            }
+
+            *self.outgoing_tx.lock().await = None;
+            *self.incoming_rx.lock().await = None;
             *self.state.write().await = ConnectionState::Disconnected;
-            // TODO: Close WebSocket connection
             Ok(())
         }
 

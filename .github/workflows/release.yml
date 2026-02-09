@@ -98,10 +98,118 @@ jobs:
 
           echo "version=${cargo_version}" >> "${GITHUB_OUTPUT}"
 
+  ci_gate:
+    name: Gate On CI
+    runs-on: ubuntu-latest
+    needs: validate_version
+    permissions:
+      actions: read
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.validate_version.outputs.tag }}
+    steps:
+      - name: Resolve release commit from tag
+        id: release_sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          repo = os.environ["REPO"]
+          tag = os.environ["RELEASE_TAG"]
+
+          def gh_api(path: str):
+              import urllib.request
+
+              req = urllib.request.Request(
+                  f"https://api.github.com{path}",
+                  headers={
+                      "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read())
+
+          ref = gh_api(f"/repos/{repo}/git/ref/tags/{tag}")
+          obj = ref["object"]
+          sha = obj["sha"]
+
+          # Annotated tags point to a tag object; peel to commit.
+          if obj["type"] == "tag":
+              tag_obj = gh_api(f"/repos/{repo}/git/tags/{sha}")
+              sha = tag_obj["object"]["sha"]
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"sha={sha}\n")
+          print(f"Resolved {tag} -> {sha}")
+          PY
+
+      - name: Wait for CI workflow success on release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ steps.release_sha.outputs.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import time
+
+          repo = os.environ["REPO"]
+          sha = os.environ["RELEASE_SHA"]
+          deadline = time.time() + 3600  # 60 minutes
+
+          def gh_api(path: str):
+              import urllib.request
+
+              req = urllib.request.Request(
+                  f"https://api.github.com{path}",
+                  headers={
+                      "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read())
+
+          while True:
+              runs = gh_api(f"/repos/{repo}/actions/runs?head_sha={sha}&per_page=100")["workflow_runs"]
+              ci_runs = [r for r in runs if r.get("name") == "CI"]
+
+              if ci_runs:
+                  run = max(ci_runs, key=lambda r: r["run_number"])
+                  status = run.get("status")
+                  conclusion = run.get("conclusion")
+                  url = run.get("html_url")
+                  print(f"CI run: status={status} conclusion={conclusion} url={url}")
+
+                  if status == "completed":
+                      if conclusion == "success":
+                          print("CI gate passed.")
+                          break
+                      print("CI gate failed: CI workflow did not succeed.")
+                      sys.exit(1)
+              else:
+                  print(f"No CI workflow run found yet for {sha}.")
+
+              if time.time() > deadline:
+                  print("Timed out waiting for CI workflow completion.")
+                  sys.exit(1)
+
+              time.sleep(20)
+          PY
+
   publish:
     name: Publish Crate
     runs-on: ubuntu-latest
-    needs: validate_version
+    needs: [validate_version, ci_gate]
     if: github.event_name == 'push' || github.event.inputs.publish == 'true'
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
