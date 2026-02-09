@@ -860,7 +860,10 @@ fn generate_router_codec(router: &RouterManifest) -> String {
     s
 }
 
-fn generate_cargo_toml(manifest: &SchemaManifest, transport_mode: TransportMode) -> Result<GeneratedFile> {
+fn generate_cargo_toml(
+    manifest: &SchemaManifest,
+    transport_mode: TransportMode,
+) -> Result<GeneratedFile> {
     let name = utils::to_snake_case(&manifest.meta.name);
 
     let default_features = if transport_mode == TransportMode::Ffi {
@@ -1243,7 +1246,10 @@ impl TransportConfig {
 }
 
 /// Generate WebTransport module with native/WASM support
-fn generate_webtransport(manifest: &SchemaManifest, transport_mode: TransportMode) -> Result<GeneratedFile> {
+fn generate_webtransport(
+    manifest: &SchemaManifest,
+    transport_mode: TransportMode,
+) -> Result<GeneratedFile> {
     let router_name = manifest
         .router
         .as_ref()
@@ -1710,7 +1716,10 @@ pub use wasm::WebTransportClient;
 }
 
 /// Generate WebSocket module with native/WASM support
-fn generate_websocket(manifest: &SchemaManifest, transport_mode: TransportMode) -> Result<GeneratedFile> {
+fn generate_websocket(
+    manifest: &SchemaManifest,
+    transport_mode: TransportMode,
+) -> Result<GeneratedFile> {
     let router_name = manifest
         .router
         .as_ref()

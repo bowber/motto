@@ -18,9 +18,7 @@ use tokio_tungstenite::tungstenite::Message;
 /// (`async fn`) so that concrete types can be used directly without boxing.
 pub trait Transport {
     /// Connect to the remote endpoint.
-    fn connect(
-        &mut self,
-    ) -> impl std::future::Future<Output = Result<(), TransportError>> + Send;
+    fn connect(&mut self) -> impl std::future::Future<Output = Result<(), TransportError>> + Send;
 
     /// Disconnect from the remote endpoint. Idempotent.
     fn disconnect(&mut self) -> impl std::future::Future<Output = ()> + Send;
@@ -167,7 +165,15 @@ impl WebSocketClient {
         let keepalive_interval_ms = self.config.keepalive_interval_ms;
 
         let handle = tokio::spawn(async move {
-            Self::connection_loop(ws_sink, ws_source, outgoing_rx, incoming_tx, state, keepalive_interval_ms).await;
+            Self::connection_loop(
+                ws_sink,
+                ws_source,
+                outgoing_rx,
+                incoming_tx,
+                state,
+                keepalive_interval_ms,
+            )
+            .await;
         });
         self.task_handle = Some(handle);
 

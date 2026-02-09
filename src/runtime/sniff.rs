@@ -196,15 +196,12 @@ impl CapturedFrame {
                             ));
                         }
                     } else if !dec.fields.is_empty() && config.redact {
-                        out.push_str(&format!(
-                            " ({} fields, redacted)",
-                            dec.fields.len()
-                        ));
+                        out.push_str(&format!(" ({} fields, redacted)", dec.fields.len()));
                     }
                     out.push_str(&format!(" payload={} bytes", dec.payload_size));
                 } else {
                     // Raw hex preview
-                    out.push_str(" ");
+                    out.push(' ');
                     out.push_str(&hex_preview(&display_data, 32));
                 }
             }
@@ -339,10 +336,7 @@ impl CapturedFrame {
                 out.push_str(&hex_dump(p));
             }
             FrameKind::Close(reason) => {
-                out.push_str(&format!(
-                    "CLOSE: {}",
-                    reason.as_deref().unwrap_or("(none)")
-                ));
+                out.push_str(&format!("CLOSE: {}", reason.as_deref().unwrap_or("(none)")));
             }
         }
 
@@ -377,8 +371,8 @@ pub fn decode_packet(data: &[u8], manifest: &SchemaManifest) -> Option<DecodedPa
     let (discriminant, message_type, fields) = if payload.len() >= 2 {
         let disc = u16::from_le_bytes([payload[0], payload[1]]);
         let router = manifest.router.as_ref();
-        let variant: Option<&RouterVariant> = router
-            .and_then(|r| r.variants.iter().find(|v| v.discriminant == disc));
+        let variant: Option<&RouterVariant> =
+            router.and_then(|r| r.variants.iter().find(|v| v.discriminant == disc));
 
         if let Some(variant) = variant {
             // Resolve fields from the matching message definition
@@ -399,11 +393,7 @@ pub fn decode_packet(data: &[u8], manifest: &SchemaManifest) -> Option<DecodedPa
                 })
                 .unwrap_or_default();
 
-            (
-                Some(disc),
-                Some(variant.message_type.clone()),
-                msg_fields,
-            )
+            (Some(disc), Some(variant.message_type.clone()), msg_fields)
         } else {
             // Discriminant didn't match any router variant — might not be
             // a router-framed packet, or might be bitcode-encoded differently
@@ -508,9 +498,7 @@ async fn run_tap_webtransport(
     let endpoint = wtransport::Endpoint::client(client_config)?;
     let connection = endpoint.connect(url).await?;
 
-    eprintln!(
-        "motto sniff: WebTransport connected, listening for datagrams (Ctrl+C to stop)"
-    );
+    eprintln!("motto sniff: WebTransport connected, listening for datagrams (Ctrl+C to stop)");
     eprintln!();
 
     let start = Instant::now();
@@ -732,9 +720,7 @@ fn ws_message_to_kind(msg: &Message, config: &SniffConfig) -> FrameKind {
         Message::Text(text) => FrameKind::Text(text.to_string()),
         Message::Ping(payload) => FrameKind::Ping(payload.to_vec()),
         Message::Pong(payload) => FrameKind::Pong(payload.to_vec()),
-        Message::Close(frame) => {
-            FrameKind::Close(frame.as_ref().map(|f| f.reason.to_string()))
-        }
+        Message::Close(frame) => FrameKind::Close(frame.as_ref().map(|f| f.reason.to_string())),
         // Frame variant (raw) — treat as binary
         _ => FrameKind::Binary {
             data: vec![],
@@ -758,7 +744,11 @@ fn hex_preview(data: &[u8], max: usize) -> String {
         return "(empty)".to_string();
     }
     let show = if data.len() > max { &data[..max] } else { data };
-    let hex_str: String = show.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+    let hex_str: String = show
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(" ");
     if data.len() > max {
         format!("{}...", hex_str)
     } else {
@@ -823,10 +813,16 @@ mod tests {
 
     #[test]
     fn test_output_format_parse() {
-        assert_eq!("pretty".parse::<OutputFormat>().unwrap(), OutputFormat::Pretty);
+        assert_eq!(
+            "pretty".parse::<OutputFormat>().unwrap(),
+            OutputFormat::Pretty
+        );
         assert_eq!("json".parse::<OutputFormat>().unwrap(), OutputFormat::Json);
         assert_eq!("hex".parse::<OutputFormat>().unwrap(), OutputFormat::Hex);
-        assert_eq!("Pretty".parse::<OutputFormat>().unwrap(), OutputFormat::Pretty);
+        assert_eq!(
+            "Pretty".parse::<OutputFormat>().unwrap(),
+            OutputFormat::Pretty
+        );
         assert!("unknown".parse::<OutputFormat>().is_err());
     }
 

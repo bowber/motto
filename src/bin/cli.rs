@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use motto::prelude::*;
 use std::path::PathBuf;
-use tracing::{info, Level};
+use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser)]

@@ -17,7 +17,6 @@
 //! shared across threads without external synchronization — create one
 //! handle per connection.
 
-#![cfg(feature = "ffi-transport")]
 #![allow(private_interfaces)] // Intentional: TransportHandle is opaque behind a raw pointer
 
 use crate::runtime::state::ConnectionState;
@@ -154,9 +153,9 @@ pub unsafe extern "C" fn motto_transport_new(url: *const c_char) -> MottoTranspo
     let client = if url_str.starts_with("https://") {
         #[cfg(feature = "webtransport")]
         {
-            TransportClient::WebTransport(
-                crate::runtime::webtransport::WebTransportClient::new(config),
-            )
+            TransportClient::WebTransport(crate::runtime::webtransport::WebTransportClient::new(
+                config,
+            ))
         }
         #[cfg(not(feature = "webtransport"))]
         {
@@ -304,7 +303,7 @@ pub unsafe extern "C" fn motto_transport_recv(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn motto_transport_recv_free(data: *mut u8, len: usize) {
     if !data.is_null() && len > 0 {
-        let _ = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(data, len)) };
+        let _ = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len)) };
     }
 }
 

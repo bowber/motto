@@ -5,7 +5,7 @@
 //! - WebAssembly.instantiate support
 //! - Zero-copy packet framing
 
-use crate::emitters::{utils, Emitter, EmitterConfig, GeneratedFile, TransportMode};
+use crate::emitters::{Emitter, EmitterConfig, GeneratedFile, TransportMode, utils};
 use crate::ir::manifest::*;
 use anyhow::Result;
 use std::path::PathBuf;
