@@ -11,13 +11,18 @@ pub mod codec;
 pub mod compression;
 #[cfg(feature = "ffi-transport")]
 pub mod ffi;
+pub mod sniff;
 pub mod state;
 pub mod transport;
 
 pub use codec::MottoCodec;
 pub use compression::ZstdCompressor;
 pub use state::StateMachine;
-pub use transport::{WebSocketClient, WebTransportClient};
+pub use transport::WebSocketClient;
+#[cfg(feature = "webtransport")]
+pub mod webtransport;
+#[cfg(feature = "webtransport")]
+pub use webtransport::WebTransportClient;
 
 /// Main runtime entry point
 pub struct MottoRuntime {

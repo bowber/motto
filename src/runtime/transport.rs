@@ -1,4 +1,6 @@
 //! Transport Client - Async transport layer with WebSocket support
+//!
+//! Defines the `Transport` trait and provides a WebSocket implementation.
 
 use crate::runtime::codec::PROTOCOL_VERSION;
 use crate::runtime::state::{ConnectionState, RetryConfig, StateMachine};
@@ -6,6 +8,46 @@ use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tokio_tungstenite::tungstenite::Message;
+
+// ─── Transport trait ─────────────────────────────────────────────────────────
+
+/// Common interface for all transport implementations (WebSocket, WebTransport, etc.)
+///
+/// Every transport speaks the same binary protocol: a version byte prefix followed
+/// by bitcode-encoded payload. The trait is intentionally *not* object-safe
+/// (`async fn`) so that concrete types can be used directly without boxing.
+pub trait Transport {
+    /// Connect to the remote endpoint.
+    fn connect(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<(), TransportError>> + Send;
+
+    /// Disconnect from the remote endpoint. Idempotent.
+    fn disconnect(&mut self) -> impl std::future::Future<Output = ()> + Send;
+
+    /// Send a binary message (must start with the protocol version byte).
+    fn send(
+        &self,
+        data: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<(), TransportError>> + Send;
+
+    /// Receive a binary message. Blocks until a message arrives or the connection closes.
+    fn receive(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, TransportError>> + Send;
+
+    /// Try to receive without blocking.
+    fn try_receive(&mut self) -> Result<Option<Vec<u8>>, TransportError>;
+
+    /// Get the current connection state.
+    fn state(&self) -> impl std::future::Future<Output = ConnectionState> + Send;
+
+    /// Check if connected.
+    fn is_connected(&self) -> impl std::future::Future<Output = bool> + Send;
+
+    /// Get the server URL.
+    fn url(&self) -> &str;
+}
 
 /// Transport client configuration
 #[derive(Debug, Clone)]
@@ -281,8 +323,39 @@ impl WebSocketClient {
     }
 }
 
-/// Legacy alias for backward compatibility
-pub type WebTransportClient = WebSocketClient;
+impl Transport for WebSocketClient {
+    async fn connect(&mut self) -> Result<(), TransportError> {
+        self.connect().await
+    }
+
+    async fn disconnect(&mut self) {
+        self.disconnect().await
+    }
+
+    async fn send(&self, data: Vec<u8>) -> Result<(), TransportError> {
+        self.send(data).await
+    }
+
+    async fn receive(&mut self) -> Result<Vec<u8>, TransportError> {
+        self.receive().await
+    }
+
+    fn try_receive(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+        self.try_receive()
+    }
+
+    async fn state(&self) -> ConnectionState {
+        self.state().await
+    }
+
+    async fn is_connected(&self) -> bool {
+        self.is_connected().await
+    }
+
+    fn url(&self) -> &str {
+        self.url()
+    }
+}
 
 /// Transport errors
 #[derive(Debug, thiserror::Error)]

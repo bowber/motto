@@ -299,3 +299,73 @@ fn test_cli_generate_missing_schema() {
         .assert()
         .failure();
 }
+
+// ─── Sniff command tests ─────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_sniff_help() {
+    motto()
+        .args(["sniff", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("transport traffic"));
+}
+
+#[test]
+fn test_cli_sniff_unknown_mode() {
+    motto()
+        .args([
+            "sniff",
+            "--mode",
+            "invalid",
+            "--upstream",
+            "ws://localhost:9999",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Unknown sniff mode"));
+}
+
+#[test]
+fn test_cli_sniff_unknown_format() {
+    motto()
+        .args([
+            "sniff",
+            "--format",
+            "xml",
+            "--upstream",
+            "ws://localhost:9999",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unknown format"));
+}
+
+#[test]
+fn test_cli_sniff_tap_requires_upstream() {
+    motto()
+        .args(["sniff", "--mode", "tap"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--upstream"));
+}
+
+#[test]
+fn test_cli_sniff_proxy_requires_upstream() {
+    motto()
+        .args(["sniff", "--mode", "proxy"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--upstream"));
+}
+
+#[test]
+fn test_cli_sniff_decode_disabled_with_no_decode() {
+    // --no-decode should skip schema loading entirely; fails only because
+    // there is no upstream to connect to, not because of schema issues
+    motto()
+        .args(["sniff", "--no-decode", "--upstream", "ws://localhost:9999"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("sniff tap error"));
+}

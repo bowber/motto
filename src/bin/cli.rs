@@ -139,12 +139,12 @@ struct SniffArgs {
     format: String,
 
     /// Path to schema.rs for protocol-aware decoding
-    #[arg(short, long)]
-    schema: Option<PathBuf>,
+    #[arg(short, long, default_value = "src/schema.rs")]
+    schema: PathBuf,
 
-    /// Decode packets using schema definitions
+    /// Disable schema-aware packet decoding
     #[arg(long)]
-    decode: bool,
+    no_decode: bool,
 
     /// Redact field values in output (show structure only)
     #[arg(long)]
@@ -332,22 +332,82 @@ fn cmd_check(args: CheckArgs) -> Result<()> {
 }
 
 fn cmd_sniff(args: SniffArgs) -> Result<()> {
+    use motto::runtime::sniff::{OutputFormat, SniffConfig};
+
     info!("Starting motto sniff in '{}' mode...", args.mode);
     info!("Output format: {}", args.format);
 
-    match args.mode.as_str() {
-        "tap" => {
-            info!("Tap mode: listening for FFI transport events");
-            if args.decode {
-                if let Some(ref schema_path) = args.schema {
-                    info!("Schema-aware decoding enabled from {:?}", schema_path);
-                } else {
-                    anyhow::bail!("--decode requires --schema <path> to load protocol definitions");
+    // Parse output format
+    let format: OutputFormat = args
+        .format
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!(e))?;
+
+    // Load schema manifest for decoding (enabled by default)
+    let decode = !args.no_decode;
+    let manifest = if decode {
+        let schema_path = &args.schema;
+        if schema_path.exists() {
+            info!("Loading schema from {:?} for decode mode", schema_path);
+            let parser = SchemaParser::new();
+            match parser.parse_file(schema_path) {
+                Ok(schema) => {
+                    let ir_gen = IrGenerator::new();
+                    match ir_gen.generate(&schema) {
+                        Ok(m) => Some(m),
+                        Err(e) => {
+                            eprintln!(
+                                "motto sniff: failed to generate IR from {:?}: {} (decoding disabled)",
+                                schema_path, e
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "motto sniff: failed to parse {:?}: {} (decoding disabled)",
+                        schema_path, e
+                    );
+                    None
                 }
             }
-            // TODO: Implement tap mode — attach to FFI transport event stream
-            info!("Sniff tap mode not yet implemented (transport core pending)");
-            Ok(())
+        } else {
+            info!(
+                "Schema file {:?} not found, running without decode",
+                schema_path
+            );
+            None
+        }
+    } else {
+        None
+    };
+
+    let config = SniffConfig {
+        format,
+        manifest,
+        decode,
+        redact: args.redact,
+        max_bytes: args.max_bytes,
+    };
+
+    // Build a tokio runtime for the async sniff operations
+    let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
+
+    match args.mode.as_str() {
+        "tap" => {
+            // Tap mode requires --upstream (the WS endpoint to connect to and listen on)
+            let url = args.upstream.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "tap mode requires --upstream <ws://host:port> to specify the endpoint to listen on"
+                )
+            })?;
+            info!("Tap mode: connecting to {} to listen for frames", url);
+            rt.block_on(async {
+                motto::runtime::sniff::run_tap(url, &config)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("sniff tap error: {}", e))
+            })
         }
         "proxy" => {
             let upstream = args.upstream.as_deref().ok_or_else(|| {
@@ -357,9 +417,11 @@ fn cmd_sniff(args: SniffArgs) -> Result<()> {
                 "Proxy mode: {} -> {} (relay with frame logging)",
                 args.listen, upstream
             );
-            // TODO: Implement proxy mode — WS relay with frame logging
-            info!("Sniff proxy mode not yet implemented (transport core pending)");
-            Ok(())
+            rt.block_on(async {
+                motto::runtime::sniff::run_proxy(&args.listen, upstream, &config)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("sniff proxy error: {}", e))
+            })
         }
         other => anyhow::bail!("Unknown sniff mode '{}': expected 'tap' or 'proxy'", other),
     }

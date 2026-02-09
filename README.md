@@ -208,6 +208,30 @@ Deploy new versions alongside old ones. Migrate clients gradually. Zero downtime
 | `check` | Check schema for breaking changes |
 | `lock` | Update motto.lock with new schema fingerprint |
 | `watch` | Watch for schema changes and regenerate |
+| `sniff` | Inspect live transport frames (tap or proxy mode) |
+
+### `motto sniff`
+
+Inspect live transport traffic for debugging protocol issues.
+
+```bash
+# Tap mode: connect directly and print incoming frames
+motto sniff tap --upstream ws://127.0.0.1:9001
+
+# Proxy mode: relay client<->server and log both directions
+motto sniff proxy --listen 127.0.0.1:9010 --upstream ws://127.0.0.1:9001
+
+# Schema-aware decode is enabled by default (uses src/schema.rs)
+# Disable decode when needed:
+motto sniff tap --upstream ws://127.0.0.1:9001 --no-decode
+
+# Use a custom schema file path for decoding:
+motto sniff tap --upstream ws://127.0.0.1:9001 --schema examples/game/schema.rs
+
+# Alternate output formats:
+motto sniff tap --upstream ws://127.0.0.1:9001 --format json
+motto sniff tap --upstream ws://127.0.0.1:9001 --format hex
+```
 
 ## Generated Output Structure
 

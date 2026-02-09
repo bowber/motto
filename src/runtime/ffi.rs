@@ -21,14 +21,63 @@
 #![allow(private_interfaces)] // Intentional: TransportHandle is opaque behind a raw pointer
 
 use crate::runtime::state::ConnectionState;
-use crate::runtime::transport::{TransportConfig, WebSocketClient};
+use crate::runtime::transport::{TransportConfig, TransportError, WebSocketClient};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-/// Opaque handle wrapping a WebSocket client + its own tokio runtime
+/// Transport client enum — holds either WebSocket or WebTransport
+enum TransportClient {
+    WebSocket(WebSocketClient),
+    #[cfg(feature = "webtransport")]
+    WebTransport(crate::runtime::webtransport::WebTransportClient),
+}
+
+impl TransportClient {
+    async fn connect(&mut self) -> Result<(), TransportError> {
+        match self {
+            Self::WebSocket(c) => c.connect().await,
+            #[cfg(feature = "webtransport")]
+            Self::WebTransport(c) => c.connect().await,
+        }
+    }
+
+    async fn disconnect(&mut self) {
+        match self {
+            Self::WebSocket(c) => c.disconnect().await,
+            #[cfg(feature = "webtransport")]
+            Self::WebTransport(c) => c.disconnect().await,
+        }
+    }
+
+    async fn send(&self, data: Vec<u8>) -> Result<(), TransportError> {
+        match self {
+            Self::WebSocket(c) => c.send(data).await,
+            #[cfg(feature = "webtransport")]
+            Self::WebTransport(c) => c.send(data).await,
+        }
+    }
+
+    async fn receive(&mut self) -> Result<Vec<u8>, TransportError> {
+        match self {
+            Self::WebSocket(c) => c.receive().await,
+            #[cfg(feature = "webtransport")]
+            Self::WebTransport(c) => c.receive().await,
+        }
+    }
+
+    async fn state(&self) -> ConnectionState {
+        match self {
+            Self::WebSocket(c) => c.state().await,
+            #[cfg(feature = "webtransport")]
+            Self::WebTransport(c) => c.state().await,
+        }
+    }
+}
+
+/// Opaque handle wrapping a transport client + its own tokio runtime
 struct TransportHandle {
-    client: WebSocketClient,
+    client: TransportClient,
     runtime: tokio::runtime::Runtime,
     last_error: Option<CString>,
 }
@@ -97,12 +146,28 @@ pub unsafe extern "C" fn motto_transport_new(url: *const c_char) -> MottoTranspo
     };
 
     let config = TransportConfig {
-        url: url_str,
+        url: url_str.clone(),
         ..Default::default()
     };
 
+    // Detect scheme to create appropriate client
+    let client = if url_str.starts_with("https://") {
+        #[cfg(feature = "webtransport")]
+        {
+            TransportClient::WebTransport(
+                crate::runtime::webtransport::WebTransportClient::new(config),
+            )
+        }
+        #[cfg(not(feature = "webtransport"))]
+        {
+            return ptr::null_mut(); // WebTransport not available
+        }
+    } else {
+        TransportClient::WebSocket(WebSocketClient::new(config))
+    };
+
     let handle = Box::new(TransportHandle {
-        client: WebSocketClient::new(config),
+        client,
         runtime,
         last_error: None,
     });

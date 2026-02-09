@@ -1,6 +1,6 @@
 [package]
 name = "motto"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 authors = ["bowber <baolam.9a9@gmail.com>"]
 description = "Compiler-as-a-Service: Turn Rust schema.rs into multi-platform SDK toolkits"
@@ -48,6 +48,9 @@ tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
 url = "2"
 
+# WebTransport (HTTP/3 over QUIC)
+wtransport = { version = "0.7", optional = true }
+
 # Error handling
 thiserror = "2"
 anyhow = "1"
@@ -82,3 +85,4 @@ emitter-swift = []
 emitter-kotlin = []
 emitter-unity = []
 ffi-transport = []
+webtransport = ["dep:wtransport"]
