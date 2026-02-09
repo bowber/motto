@@ -5,7 +5,7 @@
 //! - Zero-copy interface for packet framing
 //! - 1-byte version header support
 
-use crate::emitters::{Emitter, EmitterConfig, GeneratedFile, utils};
+use crate::emitters::{utils, Emitter, EmitterConfig, GeneratedFile, TransportMode};
 use crate::ir::manifest::*;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -93,7 +93,7 @@ impl Emitter for TypeScriptEmitter {
             // Generate codec file
             generate_codec(&config.manifest)?,
             // Generate runtime file
-            generate_runtime(&config.manifest)?,
+            generate_runtime(&config.manifest, config.transport_mode)?,
             // Generate index file with exports
             generate_index(&config.manifest, config)?,
         ];
@@ -913,59 +913,100 @@ fn parse_generic_type(type_ref: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn generate_runtime(manifest: &SchemaManifest) -> Result<GeneratedFile> {
-    let content = format!(
-        r#"{}
+fn generate_runtime(
+    manifest: &SchemaManifest,
+    transport_mode: TransportMode,
+) -> Result<GeneratedFile> {
+    let transport_class = match transport_mode {
+        TransportMode::Ffi => {
+            r#"/**
+ * FFI-backed transport using the motto transport core.
+ * Requires the motto native library (libmotto_transport) to be available.
+ */
+export class MottoTransport {{
+  private ffi: any;
+  private handle: any;
+  private _state: ConnectionState = ConnectionState.Disconnected;
+  private url: string;
+  private retryConfig: RetryConfig;
 
-// Motto Runtime - State Machine & Transport Layer
+  constructor(url: string, retryConfig: RetryConfig = DEFAULT_RETRY_CONFIG) {{
+    this.url = url;
+    this.retryConfig = retryConfig;
+    // Dynamic import of ffi-napi for Node.js environments
+    try {{
+      const ffi = require('ffi-napi');
+      const ref = require('ref-napi');
+      this.ffi = ffi.Library('libmotto_transport', {{
+        'motto_transport_new': ['pointer', ['string']],
+        'motto_transport_free': ['void', ['pointer']],
+        'motto_transport_connect': ['int', ['pointer']],
+        'motto_transport_close': ['void', ['pointer']],
+        'motto_transport_send': ['int', ['pointer', 'pointer', 'size_t']],
+        'motto_transport_recv': ['int', ['pointer', 'pointer', 'pointer']],
+        'motto_transport_recv_free': ['void', ['pointer', 'size_t']],
+        'motto_transport_state': ['uint8', ['pointer']],
+        'motto_transport_last_error': ['string', ['pointer']],
+      }});
+    }} catch (e) {{
+      throw new Error('FFI transport requires ffi-napi and ref-napi packages. Install with: npm install ffi-napi ref-napi');
+    }}
+  }}
 
-export const PROTOCOL_VERSION = 0x{:02X};
+  async connect(): Promise<void> {{
+    if (!this.handle) {{
+      this.handle = this.ffi.motto_transport_new(this.url);
+      if (this.handle.isNull()) {{
+        throw new Error('Failed to create transport handle');
+      }}
+    }}
+    this._state = ConnectionState.Connecting;
+    const rc = this.ffi.motto_transport_connect(this.handle);
+    if (rc !== 0) {{
+      this._state = ConnectionState.Error;
+      throw new Error(this.ffi.motto_transport_last_error(this.handle) || 'Connection failed');
+    }}
+    this._state = ConnectionState.Connected;
+  }}
 
-/** Connection state machine */
-export enum ConnectionState {{
-  Disconnected = 0,
-  Connecting = 1,
-  Connected = 2,
-  Reconnecting = 3,
-  Error = 4,
-}}
+  async sendDatagram(data: Uint8Array): Promise<void> {{
+    if (!this.handle) throw new Error('Not connected');
+    const buf = Buffer.from(data);
+    const rc = this.ffi.motto_transport_send(this.handle, buf, buf.length);
+    if (rc !== 0) {{
+      throw new Error(this.ffi.motto_transport_last_error(this.handle) || 'Send failed');
+    }}
+  }}
 
-/** Retry configuration */
-export interface RetryConfig {{
-  maxRetries: number;
-  initialDelayMs: number;
-  maxDelayMs: number;
-  backoffMultiplier: number;
-}}
+  async *receiveDatagram(): AsyncGenerator<Uint8Array> {{
+    // Note: FFI recv is blocking; in production, run in a worker thread
+    while (this._state === ConnectionState.Connected) {{
+      // Placeholder: actual implementation would use worker_threads
+      yield new Uint8Array(0);
+      break;
+    }}
+  }}
 
-export const DEFAULT_RETRY_CONFIG: RetryConfig = {{
-  maxRetries: 5,
-  initialDelayMs: 100,
-  maxDelayMs: 30000,
-  backoffMultiplier: 2,
-}};
+  get state(): ConnectionState {{
+    if (this.handle) {{
+      const s = this.ffi.motto_transport_state(this.handle);
+      return s as ConnectionState;
+    }}
+    return this._state;
+  }}
 
-/** Calculate retry delay with exponential backoff */
-export function calculateRetryDelay(attempt: number, config: RetryConfig = DEFAULT_RETRY_CONFIG): number {{
-  const delay = config.initialDelayMs * Math.pow(config.backoffMultiplier, attempt);
-  return Math.min(delay, config.maxDelayMs);
-}}
-
-/** Decompress zstd data (requires external zstd library) */
-export async function decompressZstd(data: Uint8Array): Promise<Uint8Array> {{
-  // This is a placeholder - actual implementation depends on runtime
-  // For browser: use zstd-wasm
-  // For Node.js: use zstd-napi
-  throw new Error('Zstd decompression not implemented. Import @aspect/zstd or similar.');
-}}
-
-/** Compress data with zstd (requires external zstd library) */
-export async function compressZstd(data: Uint8Array, level: number = 3): Promise<Uint8Array> {{
-  // This is a placeholder - actual implementation depends on runtime
-  throw new Error('Zstd compression not implemented. Import @aspect/zstd or similar.');
-}}
-
-/** WebTransport connection wrapper */
+  async close(): Promise<void> {{
+    if (this.handle) {{
+      this.ffi.motto_transport_close(this.handle);
+      this.ffi.motto_transport_free(this.handle);
+      this.handle = null;
+    }}
+    this._state = ConnectionState.Disconnected;
+  }}
+}}"#
+        }
+        TransportMode::Runtime => {
+            r#"/** WebTransport connection wrapper */
 export class MottoTransport {{
   private transport: WebTransport | null = null;
   private state: ConnectionState = ConnectionState.Disconnected;
@@ -1046,14 +1087,70 @@ export class MottoTransport {{
     }}
     this.state = ConnectionState.Disconnected;
   }}
+}}"#
+        }
+    };
+
+    let content = format!(
+        r#"{}
+
+// Motto Runtime - State Machine & Transport Layer
+
+export const PROTOCOL_VERSION = 0x{:02X};
+
+/** Connection state machine */
+export enum ConnectionState {{
+  Disconnected = 0,
+  Connecting = 1,
+  Connected = 2,
+  Reconnecting = 3,
+  Error = 4,
 }}
+
+/** Retry configuration */
+export interface RetryConfig {{
+  maxRetries: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+  backoffMultiplier: number;
+}}
+
+export const DEFAULT_RETRY_CONFIG: RetryConfig = {{
+  maxRetries: 5,
+  initialDelayMs: 100,
+  maxDelayMs: 30000,
+  backoffMultiplier: 2,
+}};
+
+/** Calculate retry delay with exponential backoff */
+export function calculateRetryDelay(attempt: number, config: RetryConfig = DEFAULT_RETRY_CONFIG): number {{
+  const delay = config.initialDelayMs * Math.pow(config.backoffMultiplier, attempt);
+  return Math.min(delay, config.maxDelayMs);
+}}
+
+/** Decompress zstd data (requires external zstd library) */
+export async function decompressZstd(data: Uint8Array): Promise<Uint8Array> {{
+  // This is a placeholder - actual implementation depends on runtime
+  // For browser: use zstd-wasm
+  // For Node.js: use zstd-napi
+  throw new Error('Zstd decompression not implemented. Import @aspect/zstd or similar.');
+}}
+
+/** Compress data with zstd (requires external zstd library) */
+export async function compressZstd(data: Uint8Array, level: number = 3): Promise<Uint8Array> {{
+  // This is a placeholder - actual implementation depends on runtime
+  throw new Error('Zstd compression not implemented. Import @aspect/zstd or similar.');
+}}
+
+{}
 "#,
         utils::generate_header(
             manifest.meta.version_byte,
             &manifest.meta.fingerprint,
             &manifest.meta.generated_at
         ),
-        manifest.meta.version_byte
+        manifest.meta.version_byte,
+        transport_class
     );
 
     Ok(GeneratedFile {

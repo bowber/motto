@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use motto::prelude::*;
 use std::path::PathBuf;
-use tracing::{Level, info};
+use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser)]
@@ -35,6 +35,9 @@ enum Commands {
 
     /// Watch for schema changes and regenerate
     Watch(WatchArgs),
+
+    /// Sniff transport traffic for debugging
+    Sniff(SniffArgs),
 }
 
 #[derive(Args)]
@@ -74,6 +77,10 @@ struct GenerateArgs {
     /// Generate native addon bindings (napi-rs) for TypeScript target
     #[arg(long)]
     native: bool,
+
+    /// Transport mode for generated SDKs: runtime (pure-language, default) or ffi (shared Rust core)
+    #[arg(long, default_value = "runtime")]
+    transport: String,
 }
 
 #[derive(Args)]
@@ -121,6 +128,41 @@ struct WatchArgs {
     targets: String,
 }
 
+#[derive(Args)]
+struct SniffArgs {
+    /// Sniff mode: tap (listen to FFI transport events) or proxy (WS relay with frame logging)
+    #[arg(short, long, default_value = "tap")]
+    mode: String,
+
+    /// Output format: pretty (human-readable), json, or hex
+    #[arg(short, long, default_value = "pretty")]
+    format: String,
+
+    /// Path to schema.rs for protocol-aware decoding
+    #[arg(short, long)]
+    schema: Option<PathBuf>,
+
+    /// Decode packets using schema definitions
+    #[arg(long)]
+    decode: bool,
+
+    /// Redact field values in output (show structure only)
+    #[arg(long)]
+    redact: bool,
+
+    /// Maximum bytes to display per packet (0 = unlimited)
+    #[arg(long, default_value = "0")]
+    max_bytes: usize,
+
+    /// Proxy listen address (only used in proxy mode)
+    #[arg(long, default_value = "127.0.0.1:9901")]
+    listen: String,
+
+    /// Proxy upstream address (only used in proxy mode)
+    #[arg(long)]
+    upstream: Option<String>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -142,6 +184,7 @@ fn main() -> Result<()> {
         Commands::Check(args) => cmd_check(args),
         Commands::Lock(args) => cmd_lock(args),
         Commands::Watch(args) => cmd_watch(args),
+        Commands::Sniff(args) => cmd_sniff(args),
     }
 }
 
@@ -175,6 +218,13 @@ fn cmd_init(args: InitArgs) -> Result<()> {
 
 fn cmd_generate(args: GenerateArgs) -> Result<()> {
     info!("Generating SDKs from {:?}", args.schema);
+
+    // Parse transport mode
+    let transport_mode: motto::emitters::TransportMode = args
+        .transport
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!(e))?;
+    info!("Transport mode: {}", transport_mode);
 
     // Parse schema (use parse_file to get proper schema name from file)
     let parser = SchemaParser::new();
@@ -220,6 +270,7 @@ fn cmd_generate(args: GenerateArgs) -> Result<()> {
             output_dir: args.output.clone(),
             wasm_bindings: args.wasm,
             native_bindings: args.native,
+            transport_mode,
             manifest: manifest.clone(),
         };
 
@@ -277,6 +328,40 @@ fn cmd_check(args: CheckArgs) -> Result<()> {
             eprintln!("⚠ {}", msg);
             Ok(())
         }
+    }
+}
+
+fn cmd_sniff(args: SniffArgs) -> Result<()> {
+    info!("Starting motto sniff in '{}' mode...", args.mode);
+    info!("Output format: {}", args.format);
+
+    match args.mode.as_str() {
+        "tap" => {
+            info!("Tap mode: listening for FFI transport events");
+            if args.decode {
+                if let Some(ref schema_path) = args.schema {
+                    info!("Schema-aware decoding enabled from {:?}", schema_path);
+                } else {
+                    anyhow::bail!("--decode requires --schema <path> to load protocol definitions");
+                }
+            }
+            // TODO: Implement tap mode — attach to FFI transport event stream
+            info!("Sniff tap mode not yet implemented (transport core pending)");
+            Ok(())
+        }
+        "proxy" => {
+            let upstream = args.upstream.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("proxy mode requires --upstream <ws://host:port>")
+            })?;
+            info!(
+                "Proxy mode: {} -> {} (relay with frame logging)",
+                args.listen, upstream
+            );
+            // TODO: Implement proxy mode — WS relay with frame logging
+            info!("Sniff proxy mode not yet implemented (transport core pending)");
+            Ok(())
+        }
+        other => anyhow::bail!("Unknown sniff mode '{}': expected 'tap' or 'proxy'", other),
     }
 }
 
@@ -348,6 +433,7 @@ fn cmd_watch(args: WatchArgs) -> Result<()> {
                     force: true,
                     wasm: false,
                     native: false,
+                    transport: "runtime".to_string(),
                 };
                 if let Err(e) = cmd_generate(gen_args) {
                     eprintln!("Generation error: {}", e);

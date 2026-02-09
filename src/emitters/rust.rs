@@ -6,7 +6,7 @@
 //! - Bitcode-compatible encode/decode implementations
 //! - Zero-copy packet framing
 
-use crate::emitters::{Emitter, EmitterConfig, GeneratedFile, utils};
+use crate::emitters::{Emitter, EmitterConfig, GeneratedFile, TransportMode, utils};
 use crate::ir::manifest::*;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -34,17 +34,17 @@ impl Emitter for RustEmitter {
     fn emit(&self, config: &EmitterConfig) -> Result<Vec<GeneratedFile>> {
         let files = vec![
             // Generate lib.rs with types and router
-            generate_lib(&config.manifest)?,
+            generate_lib(&config.manifest, config.transport_mode)?,
             // Generate codec.rs with encode/decode
             generate_codec(&config.manifest)?,
             // Generate Cargo.toml
-            generate_cargo_toml(&config.manifest)?,
+            generate_cargo_toml(&config.manifest, config.transport_mode)?,
             // Generate tests
             generate_tests(&config.manifest)?,
             // Generate transport modules (feature-gated)
             generate_transport_common(&config.manifest)?,
-            generate_webtransport(&config.manifest)?,
-            generate_websocket(&config.manifest)?,
+            generate_webtransport(&config.manifest, config.transport_mode)?,
+            generate_websocket(&config.manifest, config.transport_mode)?,
         ];
 
         Ok(files)
@@ -70,7 +70,7 @@ pub fn emit(config: &EmitterConfig) -> Result<()> {
     Ok(())
 }
 
-fn generate_lib(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+fn generate_lib(manifest: &SchemaManifest, transport_mode: TransportMode) -> Result<GeneratedFile> {
     let mut content = String::new();
 
     // Header
@@ -80,7 +80,16 @@ fn generate_lib(manifest: &SchemaManifest) -> Result<GeneratedFile> {
         &manifest.meta.generated_at,
     ));
 
-    content.push_str(
+    let ffi_module_decl = if transport_mode == TransportMode::Ffi {
+        r#"
+#[cfg(feature = "ffi-transport")]
+pub mod ffi_transport;
+"#
+    } else {
+        ""
+    };
+
+    content.push_str(&format!(
         r#"
 #![allow(dead_code)]
 #![allow(clippy::derive_partial_eq_without_eq)]
@@ -99,10 +108,10 @@ pub mod webtransport;
 
 #[cfg(feature = "websocket")]
 pub mod websocket;
-
+{ffi_module_decl}
 // Re-export transport types when features are enabled
 #[cfg(any(feature = "webtransport", feature = "websocket"))]
-pub use transport::{TransportConfig, TransportError, ConnectionState};
+pub use transport::{{TransportConfig, TransportError, ConnectionState}};
 
 #[cfg(feature = "webtransport")]
 pub use webtransport::WebTransportClient;
@@ -112,7 +121,8 @@ pub use websocket::WebSocketClient;
 
 /// Protocol version byte - embedded in all packets
 pub const PROTOCOL_VERSION_BYTE: u8 = "#,
-    );
+        ffi_module_decl = ffi_module_decl,
+    ));
     content.push_str(&format!("0x{:02X};\n\n", manifest.meta.version_byte));
 
     content.push_str(&format!(
@@ -850,8 +860,15 @@ fn generate_router_codec(router: &RouterManifest) -> String {
     s
 }
 
-fn generate_cargo_toml(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+fn generate_cargo_toml(manifest: &SchemaManifest, transport_mode: TransportMode) -> Result<GeneratedFile> {
     let name = utils::to_snake_case(&manifest.meta.name);
+
+    let default_features = if transport_mode == TransportMode::Ffi {
+        r#"default = ["core", "webtransport", "websocket", "ffi-transport"]"#
+    } else {
+        r#"default = ["core", "webtransport", "websocket"]"#
+    };
+
     let content = format!(
         r#"[package]
 name = "{name}_sdk"
@@ -866,10 +883,11 @@ fingerprint = "{fingerprint}"
 protocol_version = {version_byte}
 
 [features]
-default = ["core", "webtransport", "websocket"]
+{default_features}
 core = []
 webtransport = ["core", "dep:tokio", "dep:wtransport"]
 websocket = ["core", "dep:tokio", "dep:tokio-tungstenite"]
+ffi-transport = ["core", "dep:libloading"]
 
 # WASM features (automatically enabled by target)
 wasm = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
@@ -885,6 +903,9 @@ wtransport = {{ version = "0.6", optional = true }}
 
 # Native WebSocket
 tokio-tungstenite = {{ version = "0.24", optional = true }}
+
+# FFI transport (shared Rust transport core via C ABI)
+libloading = {{ version = "0.8", optional = true }}
 
 # WASM bindings (auto-enabled on wasm32 target)
 wasm-bindgen = {{ version = "0.2", optional = true }}
@@ -914,7 +935,8 @@ web-sys = {{ version = "0.3", features = [
 "#,
         name = name,
         fingerprint = &manifest.meta.fingerprint[..16],
-        version_byte = manifest.meta.version_byte
+        version_byte = manifest.meta.version_byte,
+        default_features = default_features,
     );
 
     Ok(GeneratedFile {
@@ -1221,7 +1243,7 @@ impl TransportConfig {
 }
 
 /// Generate WebTransport module with native/WASM support
-fn generate_webtransport(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+fn generate_webtransport(manifest: &SchemaManifest, transport_mode: TransportMode) -> Result<GeneratedFile> {
     let router_name = manifest
         .router
         .as_ref()
@@ -1274,8 +1296,108 @@ use crate::PROTOCOL_VERSION_BYTE;
     ));
 
     // Native implementation
-    content.push_str(
-        r#"
+    if transport_mode == TransportMode::Ffi {
+        content.push_str(
+            r#"
+// ============================================================================
+// Native Implementation (non-WASM) — FFI-backed
+// ============================================================================
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use std::ffi::CString;
+    use std::os::raw::c_char;
+    use std::ptr;
+
+    // FFI declarations for the motto transport core
+    extern "C" {
+        fn motto_transport_new(url: *const c_char) -> *mut std::ffi::c_void;
+        fn motto_transport_free(handle: *mut std::ffi::c_void);
+        fn motto_transport_connect(handle: *mut std::ffi::c_void) -> i32;
+        fn motto_transport_close(handle: *mut std::ffi::c_void);
+        fn motto_transport_send(handle: *mut std::ffi::c_void, data: *const u8, data_len: usize) -> i32;
+        fn motto_transport_recv(handle: *mut std::ffi::c_void, out_data: *mut *mut u8, out_len: *mut usize) -> i32;
+        fn motto_transport_recv_free(data: *mut u8, len: usize);
+        fn motto_transport_state(handle: *mut std::ffi::c_void) -> u8;
+        fn motto_transport_last_error(handle: *mut std::ffi::c_void) -> *const c_char;
+    }
+
+    pub struct WebTransportClient {
+        handle: *mut std::ffi::c_void,
+    }
+
+    impl WebTransportClient {
+        pub fn new(url: &str) -> Result<Self, String> {
+            let c_url = CString::new(url).map_err(|e| e.to_string())?;
+            let handle = unsafe { motto_transport_new(c_url.as_ptr()) };
+            if handle.is_null() {
+                return Err("Failed to create transport handle".to_string());
+            }
+            Ok(Self { handle })
+        }
+
+        pub fn connect(&self) -> Result<(), String> {
+            let rc = unsafe { motto_transport_connect(self.handle) };
+            if rc != 0 {
+                return Err(self.last_error());
+            }
+            Ok(())
+        }
+
+        pub fn send(&self, data: &[u8]) -> Result<(), String> {
+            let rc = unsafe { motto_transport_send(self.handle, data.as_ptr(), data.len()) };
+            if rc != 0 {
+                return Err(self.last_error());
+            }
+            Ok(())
+        }
+
+        pub fn recv(&self) -> Result<Vec<u8>, String> {
+            let mut out_data: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let rc = unsafe { motto_transport_recv(self.handle, &mut out_data, &mut out_len) };
+            if rc != 0 {
+                return Err(self.last_error());
+            }
+            let data = unsafe { std::slice::from_raw_parts(out_data, out_len).to_vec() };
+            unsafe { motto_transport_recv_free(out_data, out_len) };
+            Ok(data)
+        }
+
+        pub fn close(&self) {
+            unsafe { motto_transport_close(self.handle) };
+        }
+
+        pub fn state(&self) -> u8 {
+            unsafe { motto_transport_state(self.handle) }
+        }
+
+        fn last_error(&self) -> String {
+            let ptr = unsafe { motto_transport_last_error(self.handle) };
+            if ptr.is_null() {
+                "Unknown error".to_string()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().to_string()
+            }
+        }
+    }
+
+    impl Drop for WebTransportClient {
+        fn drop(&mut self) {
+            if !self.handle.is_null() {
+                unsafe { motto_transport_free(self.handle) };
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::WebTransportClient;
+"#,
+        );
+    } else {
+        content.push_str(
+            r#"
 // ============================================================================
 // Native Implementation (non-WASM)
 // ============================================================================
@@ -1411,7 +1533,8 @@ mod native {
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::WebTransportClient;
 "#,
-    );
+        );
+    }
 
     // WASM implementation
     content.push_str(
@@ -1587,7 +1710,7 @@ pub use wasm::WebTransportClient;
 }
 
 /// Generate WebSocket module with native/WASM support
-fn generate_websocket(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+fn generate_websocket(manifest: &SchemaManifest, transport_mode: TransportMode) -> Result<GeneratedFile> {
     let router_name = manifest
         .router
         .as_ref()
@@ -1640,8 +1763,108 @@ use crate::PROTOCOL_VERSION_BYTE;
     ));
 
     // Native implementation
-    content.push_str(
-        r#"
+    if transport_mode == TransportMode::Ffi {
+        content.push_str(
+            r#"
+// ============================================================================
+// Native Implementation (non-WASM) — FFI-backed
+// ============================================================================
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use std::ffi::CString;
+    use std::os::raw::c_char;
+    use std::ptr;
+
+    // FFI declarations for the motto transport core
+    extern "C" {
+        fn motto_transport_new(url: *const c_char) -> *mut std::ffi::c_void;
+        fn motto_transport_free(handle: *mut std::ffi::c_void);
+        fn motto_transport_connect(handle: *mut std::ffi::c_void) -> i32;
+        fn motto_transport_close(handle: *mut std::ffi::c_void);
+        fn motto_transport_send(handle: *mut std::ffi::c_void, data: *const u8, data_len: usize) -> i32;
+        fn motto_transport_recv(handle: *mut std::ffi::c_void, out_data: *mut *mut u8, out_len: *mut usize) -> i32;
+        fn motto_transport_recv_free(data: *mut u8, len: usize);
+        fn motto_transport_state(handle: *mut std::ffi::c_void) -> u8;
+        fn motto_transport_last_error(handle: *mut std::ffi::c_void) -> *const c_char;
+    }
+
+    pub struct WebSocketClient {
+        handle: *mut std::ffi::c_void,
+    }
+
+    impl WebSocketClient {
+        pub fn new(url: &str) -> Result<Self, String> {
+            let c_url = CString::new(url).map_err(|e| e.to_string())?;
+            let handle = unsafe { motto_transport_new(c_url.as_ptr()) };
+            if handle.is_null() {
+                return Err("Failed to create transport handle".to_string());
+            }
+            Ok(Self { handle })
+        }
+
+        pub fn connect(&self) -> Result<(), String> {
+            let rc = unsafe { motto_transport_connect(self.handle) };
+            if rc != 0 {
+                return Err(self.last_error());
+            }
+            Ok(())
+        }
+
+        pub fn send(&self, data: &[u8]) -> Result<(), String> {
+            let rc = unsafe { motto_transport_send(self.handle, data.as_ptr(), data.len()) };
+            if rc != 0 {
+                return Err(self.last_error());
+            }
+            Ok(())
+        }
+
+        pub fn recv(&self) -> Result<Vec<u8>, String> {
+            let mut out_data: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let rc = unsafe { motto_transport_recv(self.handle, &mut out_data, &mut out_len) };
+            if rc != 0 {
+                return Err(self.last_error());
+            }
+            let data = unsafe { std::slice::from_raw_parts(out_data, out_len).to_vec() };
+            unsafe { motto_transport_recv_free(out_data, out_len) };
+            Ok(data)
+        }
+
+        pub fn close(&self) {
+            unsafe { motto_transport_close(self.handle) };
+        }
+
+        pub fn state(&self) -> u8 {
+            unsafe { motto_transport_state(self.handle) }
+        }
+
+        fn last_error(&self) -> String {
+            let ptr = unsafe { motto_transport_last_error(self.handle) };
+            if ptr.is_null() {
+                "Unknown error".to_string()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().to_string()
+            }
+        }
+    }
+
+    impl Drop for WebSocketClient {
+        fn drop(&mut self) {
+            if !self.handle.is_null() {
+                unsafe { motto_transport_free(self.handle) };
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::WebSocketClient;
+"#,
+        );
+    } else {
+        content.push_str(
+            r#"
 // ============================================================================
 // Native Implementation (non-WASM)
 // ============================================================================
@@ -1773,7 +1996,8 @@ mod native {
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::WebSocketClient;
 "#,
-    );
+        );
+    }
 
     // WASM implementation
     content.push_str(

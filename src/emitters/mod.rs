@@ -16,6 +16,40 @@ pub mod unity;
 use crate::ir::manifest::SchemaManifest;
 use std::path::PathBuf;
 
+/// Transport mode for generated SDKs
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransportMode {
+    /// Each SDK uses its own native-language transport implementation (default)
+    #[default]
+    Runtime,
+    /// SDKs bind to a shared Rust transport core via C ABI / FFI
+    Ffi,
+}
+
+impl std::fmt::Display for TransportMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportMode::Runtime => write!(f, "runtime"),
+            TransportMode::Ffi => write!(f, "ffi"),
+        }
+    }
+}
+
+impl std::str::FromStr for TransportMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "runtime" => Ok(TransportMode::Runtime),
+            "ffi" => Ok(TransportMode::Ffi),
+            _ => Err(format!(
+                "invalid transport mode '{}': expected 'runtime' or 'ffi'",
+                s
+            )),
+        }
+    }
+}
+
 /// Configuration for emitters
 #[derive(Debug, Clone)]
 pub struct EmitterConfig {
@@ -25,6 +59,8 @@ pub struct EmitterConfig {
     pub wasm_bindings: bool,
     /// Generate native addon bindings (napi-rs)
     pub native_bindings: bool,
+    /// Transport mode for generated SDK transport layer
+    pub transport_mode: TransportMode,
     /// The schema manifest to emit
     pub manifest: SchemaManifest,
 }

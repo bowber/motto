@@ -43,6 +43,11 @@ bitcode = "0.6"
 # Async runtime for WebTransport
 tokio = { version = "1", features = ["full"] }
 
+# WebSocket transport
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
+url = "2"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"
@@ -76,3 +81,4 @@ emitter-typescript = []
 emitter-swift = []
 emitter-kotlin = []
 emitter-unity = []
+ffi-transport = []

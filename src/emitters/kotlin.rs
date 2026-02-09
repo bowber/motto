@@ -5,7 +5,7 @@
 //! - Coroutine-based transport
 //! - Zero-copy packet framing
 
-use crate::emitters::{Emitter, EmitterConfig, GeneratedFile, utils};
+use crate::emitters::{utils, Emitter, EmitterConfig, GeneratedFile, TransportMode};
 use crate::ir::manifest::*;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -57,7 +57,7 @@ impl Emitter for KotlinEmitter {
         let files = vec![
             generate_types(&config.manifest)?,
             generate_codec(&config.manifest)?,
-            generate_runtime(&config.manifest)?,
+            generate_runtime(&config.manifest, config.transport_mode)?,
             generate_build_gradle(&config.manifest)?,
             generate_settings_gradle(&config.manifest)?,
             generate_tests(&config.manifest)?,
@@ -521,7 +521,75 @@ fn decode_kotlin_field(type_ref: &str) -> String {
     }
 }
 
-fn generate_runtime(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+fn generate_runtime(
+    manifest: &SchemaManifest,
+    transport_mode: TransportMode,
+) -> Result<GeneratedFile> {
+    let ffi_transport = if transport_mode == TransportMode::Ffi {
+        r#"
+
+/** FFI-backed transport using the motto native core via JNA */
+class MottoFfiTransport(
+    private val url: String,
+    private val retryConfig: RetryConfig = RetryConfig()
+) : MottoTransport {{
+    private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
+    override val state: StateFlow<ConnectionState> = _state.asStateFlow()
+
+    // JNA interface for motto transport core
+    interface MottoNative : com.sun.jna.Library {{
+        fun motto_transport_new(url: String): com.sun.jna.Pointer?
+        fun motto_transport_free(handle: com.sun.jna.Pointer)
+        fun motto_transport_connect(handle: com.sun.jna.Pointer): Int
+        fun motto_transport_close(handle: com.sun.jna.Pointer)
+        fun motto_transport_send(handle: com.sun.jna.Pointer, data: ByteArray, dataLen: Int): Int
+        fun motto_transport_state(handle: com.sun.jna.Pointer): Byte
+        fun motto_transport_last_error(handle: com.sun.jna.Pointer): String?
+    }}
+
+    private val native: MottoNative = com.sun.jna.Native.load("motto_transport", MottoNative::class.java)
+    private var handle: com.sun.jna.Pointer? = null
+
+    override suspend fun connect() {{
+        _state.value = ConnectionState.CONNECTING
+        val h = native.motto_transport_new(url)
+            ?: throw RuntimeException("Failed to create FFI transport handle")
+        handle = h
+        val rc = native.motto_transport_connect(h)
+        if (rc != 0) {{
+            _state.value = ConnectionState.ERROR
+            throw RuntimeException(native.motto_transport_last_error(h) ?: "Connection failed")
+        }}
+        _state.value = ConnectionState.CONNECTED
+    }}
+
+    override suspend fun disconnect() {{
+        handle?.let {{ h ->
+            native.motto_transport_close(h)
+            native.motto_transport_free(h)
+        }}
+        handle = null
+        _state.value = ConnectionState.DISCONNECTED
+    }}
+
+    override suspend fun send(data: ByteArray) {{
+        val h = handle ?: throw RuntimeException("Not connected")
+        val rc = native.motto_transport_send(h, data, data.size)
+        if (rc != 0) {{
+            throw RuntimeException(native.motto_transport_last_error(h) ?: "Send failed")
+        }}
+    }}
+
+    override fun receive(): Flow<ByteArray> = flow {{
+        // Note: FFI recv is blocking; wrap in Dispatchers.IO
+        // Placeholder for full implementation
+    }}
+}}
+"#
+    } else {
+        ""
+    };
+
     let content = format!(
         r#"{}
 
@@ -620,9 +688,11 @@ class MottoWebSocketTransport(
         // TODO: Receive data
     }}
 }}
+{}
 "#,
         kotlin_header(manifest),
-        manifest.meta.version_byte
+        manifest.meta.version_byte,
+        ffi_transport
     );
 
     Ok(GeneratedFile {

@@ -1,14 +1,16 @@
-//! WebTransport Client - Async transport layer
+//! Transport Client - Async transport layer with WebSocket support
 
 use crate::runtime::codec::PROTOCOL_VERSION;
 use crate::runtime::state::{ConnectionState, RetryConfig, StateMachine};
+use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
+use tokio_tungstenite::tungstenite::Message;
 
-/// WebTransport client configuration
+/// Transport client configuration
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
-    /// Server URL
+    /// Server URL (ws:// or wss://)
     pub url: String,
     /// Retry configuration
     pub retry: RetryConfig,
@@ -16,8 +18,8 @@ pub struct TransportConfig {
     pub connect_timeout_ms: u64,
     /// Keep-alive interval in milliseconds (0 = disabled)
     pub keepalive_interval_ms: u64,
-    /// Maximum datagram size
-    pub max_datagram_size: usize,
+    /// Maximum message size in bytes
+    pub max_message_size: usize,
 }
 
 impl Default for TransportConfig {
@@ -27,30 +29,33 @@ impl Default for TransportConfig {
             retry: RetryConfig::default(),
             connect_timeout_ms: 10_000,
             keepalive_interval_ms: 30_000,
-            max_datagram_size: 65535,
+            max_message_size: 65535,
         }
     }
 }
 
-/// WebTransport client
+/// WebSocket transport client
 ///
-/// Note: This is a placeholder implementation. Actual WebTransport
-/// requires a proper QUIC/HTTP3 implementation like `wtransport` or `h3`.
-pub struct WebTransportClient {
+/// Connects to a server via WebSocket (ws:// or wss://) and exchanges
+/// binary frames prefixed with the motto protocol version byte.
+pub struct WebSocketClient {
     config: TransportConfig,
     state: Arc<RwLock<StateMachine>>,
     outgoing_tx: Option<mpsc::Sender<Vec<u8>>>,
     incoming_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    /// Handle to the background connection task so we can abort on disconnect
+    task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl WebTransportClient {
-    /// Create a new WebTransport client
+impl WebSocketClient {
+    /// Create a new WebSocket client
     pub fn new(config: TransportConfig) -> Self {
         Self {
             config: config.clone(),
             state: Arc::new(RwLock::new(StateMachine::new(config.retry))),
             outgoing_tx: None,
             incoming_rx: None,
+            task_handle: None,
         }
     }
 
@@ -64,8 +69,24 @@ impl WebTransportClient {
         self.state.read().await.state().is_connected()
     }
 
-    /// Connect to the server
+    /// Connect to the server via WebSocket
     pub async fn connect(&mut self) -> Result<(), TransportError> {
+        // Validate URL before attempting connection
+        let url: url::Url = self
+            .config
+            .url
+            .parse()
+            .map_err(|e| TransportError::ConnectionFailed(format!("invalid URL: {}", e)))?;
+
+        let scheme = url.scheme();
+        if scheme != "ws" && scheme != "wss" {
+            return Err(TransportError::ConnectionFailed(format!(
+                "unsupported URL scheme '{}': expected 'ws' or 'wss'",
+                scheme
+            )));
+        }
+
+        // Transition state machine
         {
             let mut state = self.state.write().await;
             state
@@ -73,21 +94,25 @@ impl WebTransportClient {
                 .map_err(|_| TransportError::InvalidState)?;
         }
 
-        // TODO: Implement actual WebTransport connection
-        // This would use a library like `wtransport` or `h3`
-        //
-        // Example with hypothetical wtransport:
-        // let endpoint = wtransport::Endpoint::client()?;
-        // let connection = endpoint.connect(&self.config.url).await?;
+        // Attempt WebSocket handshake with timeout
+        let connect_future = tokio_tungstenite::connect_async(&self.config.url);
+        let timeout = tokio::time::Duration::from_millis(self.config.connect_timeout_ms);
+
+        let (ws_stream, _response) = tokio::time::timeout(timeout, connect_future)
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
+
+        let (ws_sink, ws_source) = ws_stream.split();
 
         // Create channels for message passing
-        let (outgoing_tx, _outgoing_rx) = mpsc::channel::<Vec<u8>>(100);
-        let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(100);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<Vec<u8>>(256);
+        let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(256);
 
         self.outgoing_tx = Some(outgoing_tx);
         self.incoming_rx = Some(incoming_rx);
 
-        // Simulate successful connection
+        // Mark connected
         {
             let mut state = self.state.write().await;
             state
@@ -95,44 +120,126 @@ impl WebTransportClient {
                 .map_err(|_| TransportError::InvalidState)?;
         }
 
-        // Start background tasks for sending/receiving
+        // Spawn background task that drives the WebSocket connection
         let state = Arc::clone(&self.state);
-        let _incoming_tx = incoming_tx;
+        let keepalive_interval_ms = self.config.keepalive_interval_ms;
 
-        tokio::spawn(async move {
-            // TODO: Receive loop
-            // while let Some(datagram) = connection.receive_datagram().await {
-            //     if incoming_tx.send(datagram).await.is_err() {
-            //         break;
-            //     }
-            // }
-            // Mark disconnected
-            let mut s = state.write().await;
-            s.disconnect();
+        let handle = tokio::spawn(async move {
+            Self::connection_loop(ws_sink, ws_source, outgoing_rx, incoming_tx, state, keepalive_interval_ms).await;
         });
+        self.task_handle = Some(handle);
 
         Ok(())
     }
 
-    /// Disconnect from the server
-    pub async fn disconnect(&mut self) {
-        let mut state = self.state.write().await;
-        state.disconnect();
-        self.outgoing_tx = None;
-        self.incoming_rx = None;
+    /// Background loop: bridges mpsc channels <-> WebSocket frames
+    async fn connection_loop(
+        mut ws_sink: futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        mut ws_source: futures_util::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+        mut outgoing_rx: mpsc::Receiver<Vec<u8>>,
+        incoming_tx: mpsc::Sender<Vec<u8>>,
+        state: Arc<RwLock<StateMachine>>,
+        keepalive_interval_ms: u64,
+    ) {
+        let keepalive = if keepalive_interval_ms > 0 {
+            Some(tokio::time::interval(tokio::time::Duration::from_millis(
+                keepalive_interval_ms,
+            )))
+        } else {
+            None
+        };
+
+        // We pin an optional interval. If keepalive is disabled, we never tick.
+        let mut keepalive_interval = keepalive;
+
+        loop {
+            tokio::select! {
+                // Outgoing: user sends data through channel -> forward as Binary frame
+                Some(data) = outgoing_rx.recv() => {
+                    if ws_sink.send(Message::Binary(data.into())).await.is_err() {
+                        break;
+                    }
+                }
+
+                // Incoming: WebSocket frame arrives -> forward to user channel
+                frame = ws_source.next() => {
+                    match frame {
+                        Some(Ok(Message::Binary(data))) => {
+                            if incoming_tx.send(data.to_vec()).await.is_err() {
+                                break; // receiver dropped
+                            }
+                        }
+                        Some(Ok(Message::Ping(payload))) => {
+                            // Auto-respond with Pong
+                            if ws_sink.send(Message::Pong(payload)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => {
+                            break; // server closed or stream ended
+                        }
+                        Some(Err(_)) => {
+                            break; // connection error
+                        }
+                        // Ignore Text, Pong, Frame
+                        _ => {}
+                    }
+                }
+
+                // Keep-alive ping
+                _ = async {
+                    if let Some(ref mut interval) = keepalive_interval {
+                        interval.tick().await
+                    } else {
+                        // Never resolves
+                        std::future::pending::<tokio::time::Instant>().await
+                    }
+                } => {
+                    if ws_sink.send(Message::Ping(vec![].into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Mark disconnected
+        let mut s = state.write().await;
+        s.disconnect();
     }
 
-    /// Send a datagram
+    /// Disconnect from the server
+    pub async fn disconnect(&mut self) {
+        {
+            let mut state = self.state.write().await;
+            state.disconnect();
+        }
+        self.outgoing_tx = None;
+        self.incoming_rx = None;
+        if let Some(handle) = self.task_handle.take() {
+            handle.abort();
+        }
+    }
+
+    /// Send a binary message (must start with protocol version byte)
     pub async fn send(&self, data: Vec<u8>) -> Result<(), TransportError> {
         // Validate version byte
         if data.is_empty() || data[0] != PROTOCOL_VERSION {
             return Err(TransportError::InvalidPacket);
         }
 
-        if data.len() > self.config.max_datagram_size {
+        if data.len() > self.config.max_message_size {
             return Err(TransportError::PacketTooLarge {
                 size: data.len(),
-                max: self.config.max_datagram_size,
+                max: self.config.max_message_size,
             });
         }
 
@@ -146,7 +253,7 @@ impl WebTransportClient {
         Ok(())
     }
 
-    /// Receive a datagram
+    /// Receive a binary message (blocking)
     pub async fn receive(&mut self) -> Result<Vec<u8>, TransportError> {
         let rx = self
             .incoming_rx
@@ -173,6 +280,9 @@ impl WebTransportClient {
         &self.config.url
     }
 }
+
+/// Legacy alias for backward compatibility
+pub type WebTransportClient = WebSocketClient;
 
 /// Transport errors
 #[derive(Debug, thiserror::Error)]
@@ -205,7 +315,7 @@ pub enum TransportError {
     IoError(#[from] std::io::Error),
 }
 
-/// Builder for WebTransport datagrams
+/// Builder for protocol-framed messages (version byte + payload)
 pub struct DatagramBuilder {
     data: Vec<u8>,
 }
@@ -262,11 +372,11 @@ mod tests {
     #[tokio::test]
     async fn test_client_state() {
         let config = TransportConfig {
-            url: "https://example.com".to_string(),
+            url: "ws://example.com".to_string(),
             ..Default::default()
         };
 
-        let client = WebTransportClient::new(config);
+        let client = WebSocketClient::new(config);
         assert_eq!(client.state().await, ConnectionState::Disconnected);
     }
 
@@ -282,5 +392,74 @@ mod tests {
         assert_eq!(datagram[0], PROTOCOL_VERSION);
         assert_eq!(datagram[1], 1);
         assert_eq!(u16::from_le_bytes([datagram[2], datagram[3]]), 42);
+    }
+
+    #[tokio::test]
+    async fn test_send_requires_version_byte() {
+        let config = TransportConfig {
+            url: "ws://example.com".to_string(),
+            ..Default::default()
+        };
+        let client = WebSocketClient::new(config);
+
+        // Not connected, should fail
+        let result = client.send(vec![PROTOCOL_VERSION, 0x01]).await;
+        assert!(result.is_err());
+
+        // Empty data should fail with InvalidPacket
+        let client2 = WebSocketClient::new(TransportConfig {
+            url: "ws://example.com".to_string(),
+            ..Default::default()
+        });
+        // We can't test send properly without connecting, but we validate the
+        // NotConnected error path
+        let result = client2.send(vec![]).await;
+        assert!(matches!(result, Err(TransportError::InvalidPacket)));
+    }
+
+    #[tokio::test]
+    async fn test_connect_invalid_url() {
+        let config = TransportConfig {
+            url: "not-a-url".to_string(),
+            ..Default::default()
+        };
+        let mut client = WebSocketClient::new(config);
+        let result = client.connect().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_connect_wrong_scheme() {
+        let config = TransportConfig {
+            url: "http://example.com".to_string(),
+            ..Default::default()
+        };
+        let mut client = WebSocketClient::new(config);
+        let result = client.connect().await;
+        assert!(matches!(result, Err(TransportError::ConnectionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn test_receive_not_connected() {
+        let config = TransportConfig {
+            url: "ws://example.com".to_string(),
+            ..Default::default()
+        };
+        let mut client = WebSocketClient::new(config);
+        let result = client.receive().await;
+        assert!(matches!(result, Err(TransportError::NotConnected)));
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_is_idempotent() {
+        let config = TransportConfig {
+            url: "ws://example.com".to_string(),
+            ..Default::default()
+        };
+        let mut client = WebSocketClient::new(config);
+        client.disconnect().await;
+        assert_eq!(client.state().await, ConnectionState::Disconnected);
+        client.disconnect().await;
+        assert_eq!(client.state().await, ConnectionState::Disconnected);
     }
 }

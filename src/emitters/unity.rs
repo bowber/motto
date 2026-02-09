@@ -5,7 +5,7 @@
 //! - WebAssembly.instantiate support
 //! - Zero-copy packet framing
 
-use crate::emitters::{Emitter, EmitterConfig, GeneratedFile, utils};
+use crate::emitters::{utils, Emitter, EmitterConfig, GeneratedFile, TransportMode};
 use crate::ir::manifest::*;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -106,7 +106,7 @@ impl Emitter for UnityEmitter {
         let files = vec![
             generate_types(&config.manifest)?,
             generate_codec(&config.manifest)?,
-            generate_runtime(&config.manifest)?,
+            generate_runtime(&config.manifest, config.transport_mode)?,
             generate_native_bridge(&config.manifest)?,
             generate_asmdef(&config.manifest)?,
             generate_dotnet_sdk_project()?,
@@ -619,7 +619,105 @@ fn decode_csharp_field(type_ref: &str) -> String {
     }
 }
 
-fn generate_runtime(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+fn generate_runtime(
+    manifest: &SchemaManifest,
+    transport_mode: TransportMode,
+) -> Result<GeneratedFile> {
+    let ffi_transport = if transport_mode == TransportMode::Ffi {
+        r#"
+
+    /// <summary>FFI-backed transport using the motto native core via P/Invoke</summary>
+    public class MottoFfiTransport : IMottoTransport
+    {{
+        [DllImport("motto_transport")]
+        private static extern IntPtr motto_transport_new(string url);
+        [DllImport("motto_transport")]
+        private static extern void motto_transport_free(IntPtr handle);
+        [DllImport("motto_transport")]
+        private static extern int motto_transport_connect(IntPtr handle);
+        [DllImport("motto_transport")]
+        private static extern void motto_transport_close(IntPtr handle);
+        [DllImport("motto_transport")]
+        private static extern int motto_transport_send(IntPtr handle, byte[] data, int dataLen);
+        [DllImport("motto_transport")]
+        private static extern int motto_transport_recv(IntPtr handle, out IntPtr outData, out int outLen);
+        [DllImport("motto_transport")]
+        private static extern void motto_transport_recv_free(IntPtr data, int len);
+        [DllImport("motto_transport")]
+        private static extern byte motto_transport_state(IntPtr handle);
+        [DllImport("motto_transport")]
+        private static extern IntPtr motto_transport_last_error(IntPtr handle);
+
+        private IntPtr _handle = IntPtr.Zero;
+        private ConnectionState _state = ConnectionState.Disconnected;
+        public ConnectionState State => _state;
+        public event System.Action<byte[]> OnReceived;
+
+        private readonly string _url;
+        private readonly RetryConfig _retryConfig;
+
+        public MottoFfiTransport(string url, RetryConfig retryConfig = null)
+        {{
+            _url = url;
+            _retryConfig = retryConfig ?? new RetryConfig();
+        }}
+
+        public async Task ConnectAsync()
+        {{
+            _state = ConnectionState.Connecting;
+            _handle = motto_transport_new(_url);
+            if (_handle == IntPtr.Zero)
+                throw new System.Exception("Failed to create FFI transport handle");
+            int rc = motto_transport_connect(_handle);
+            if (rc != 0)
+            {{
+                _state = ConnectionState.Error;
+                throw new System.Exception(GetLastError());
+            }}
+            _state = ConnectionState.Connected;
+        }}
+
+        public async Task DisconnectAsync()
+        {{
+            if (_handle != IntPtr.Zero)
+            {{
+                motto_transport_close(_handle);
+                motto_transport_free(_handle);
+                _handle = IntPtr.Zero;
+            }}
+            _state = ConnectionState.Disconnected;
+        }}
+
+        public async Task SendAsync(byte[] data)
+        {{
+            if (_handle == IntPtr.Zero)
+                throw new System.Exception("Not connected");
+            int rc = motto_transport_send(_handle, data, data.Length);
+            if (rc != 0)
+                throw new System.Exception(GetLastError());
+        }}
+
+        private string GetLastError()
+        {{
+            IntPtr ptr = motto_transport_last_error(_handle);
+            return ptr == IntPtr.Zero ? "Unknown error" : System.Runtime.InteropServices.Marshal.PtrToStringAnsi(ptr);
+        }}
+
+        ~MottoFfiTransport()
+        {{
+            if (_handle != IntPtr.Zero)
+            {{
+                motto_transport_close(_handle);
+                motto_transport_free(_handle);
+                _handle = IntPtr.Zero;
+            }}
+        }}
+    }}
+"#
+    } else {
+        ""
+    };
+
     let content = format!(
         r#"{}
 using System.Threading.Tasks;
@@ -735,9 +833,10 @@ namespace Motto.SDK
             await Task.CompletedTask;
         }}
     }}
-}}
+{}}}
 "#,
-        csharp_header(manifest)
+        csharp_header(manifest),
+        ffi_transport
     );
 
     Ok(GeneratedFile {
@@ -895,6 +994,7 @@ fn generate_dotnet_sdk_project() -> Result<GeneratedFile> {
     <Compile Include="Runtime/Types.cs" />
     <Compile Include="Runtime/Codec.cs" />
     <Compile Include="Runtime/NativeBridge.cs" />
+    <Compile Include="Runtime/Runtime.cs" />
   </ItemGroup>
 </Project>
 "#

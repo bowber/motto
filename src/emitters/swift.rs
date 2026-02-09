@@ -5,7 +5,7 @@
 //! - Codable protocol conformance
 //! - Zero-copy packet framing
 
-use crate::emitters::{Emitter, EmitterConfig, GeneratedFile, utils};
+use crate::emitters::{utils, Emitter, EmitterConfig, GeneratedFile, TransportMode};
 use crate::ir::manifest::*;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -84,7 +84,7 @@ impl Emitter for SwiftEmitter {
         let files = vec![
             generate_types(&config.manifest)?,
             generate_codec(&config.manifest)?,
-            generate_runtime(&config.manifest)?,
+            generate_runtime(&config.manifest, config.transport_mode)?,
             generate_package_swift(&config.manifest)?,
             generate_tests(&config.manifest)?,
         ];
@@ -537,7 +537,115 @@ fn decode_swift_field(type_ref: &str) -> String {
     }
 }
 
-fn generate_runtime(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+fn generate_runtime(
+    manifest: &SchemaManifest,
+    transport_mode: TransportMode,
+) -> Result<GeneratedFile> {
+    let ffi_transport = if transport_mode == TransportMode::Ffi {
+        r#"
+
+// MARK: - FFI Transport (motto native core)
+
+/// C function declarations for the motto transport core
+/// Link with: -lmotto_transport
+@_silgen_name("motto_transport_new")
+func motto_transport_new(_ url: UnsafePointer<CChar>) -> OpaquePointer?
+@_silgen_name("motto_transport_free")
+func motto_transport_free(_ handle: OpaquePointer)
+@_silgen_name("motto_transport_connect")
+func motto_transport_connect(_ handle: OpaquePointer) -> Int32
+@_silgen_name("motto_transport_close")
+func motto_transport_close(_ handle: OpaquePointer)
+@_silgen_name("motto_transport_send")
+func motto_transport_send(_ handle: OpaquePointer, _ data: UnsafePointer<UInt8>, _ len: Int) -> Int32
+@_silgen_name("motto_transport_recv")
+func motto_transport_recv(_ handle: OpaquePointer, _ outData: UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>, _ outLen: UnsafeMutablePointer<Int>) -> Int32
+@_silgen_name("motto_transport_recv_free")
+func motto_transport_recv_free(_ data: UnsafeMutablePointer<UInt8>, _ len: Int)
+@_silgen_name("motto_transport_state")
+func motto_transport_state(_ handle: OpaquePointer) -> UInt8
+@_silgen_name("motto_transport_last_error")
+func motto_transport_last_error(_ handle: OpaquePointer) -> UnsafePointer<CChar>?
+
+/// FFI-backed transport using the motto native core library
+public actor MottoFfiTransport: MottoTransportProtocol {{
+    private let url: URL
+    private let retryConfig: RetryConfig
+    private var handle: OpaquePointer?
+    public private(set) var state: ConnectionState = .disconnected
+
+    public init(url: URL, retryConfig: RetryConfig = .default) {{
+        self.url = url
+        self.retryConfig = retryConfig
+    }}
+
+    public func connect() async throws {{
+        state = .connecting
+        let cUrl = url.absoluteString.withCString {{ ptr in
+            motto_transport_new(ptr)
+        }}
+        guard let h = cUrl else {{
+            state = .error(MottoError.connectionFailed("Failed to create FFI transport handle"))
+            throw MottoError.connectionFailed("Failed to create FFI transport handle")
+        }}
+        self.handle = h
+        let rc = motto_transport_connect(h)
+        if rc != 0 {{
+            state = .error(MottoError.connectionFailed("FFI connect failed"))
+            throw MottoError.connectionFailed("FFI connect failed")
+        }}
+        state = .connected
+    }}
+
+    public func disconnect() async {{
+        if let h = handle {{
+            motto_transport_close(h)
+            motto_transport_free(h)
+            handle = nil
+        }}
+        state = .disconnected
+    }}
+
+    public func send(_ data: Data) async throws {{
+        guard let h = handle else {{ throw MottoError.notConnected }}
+        let rc = data.withUnsafeBytes {{ ptr in
+            motto_transport_send(h, ptr.baseAddress!.assumingMemoryBound(to: UInt8.self), ptr.count)
+        }}
+        if rc != 0 {{ throw MottoError.sendFailed("FFI send failed") }}
+    }}
+
+    public func receive() async throws -> Data {{
+        guard let h = handle else {{ throw MottoError.notConnected }}
+        var outData: UnsafeMutablePointer<UInt8>? = nil
+        var outLen: Int = 0
+        let rc = motto_transport_recv(h, &outData, &outLen)
+        if rc != 0 {{ throw MottoError.receiveFailed("FFI recv failed") }}
+        guard let ptr = outData else {{ throw MottoError.receiveFailed("Null data") }}
+        let data = Data(bytes: ptr, count: outLen)
+        motto_transport_recv_free(ptr, outLen)
+        return data
+    }}
+
+    deinit {{
+        // Note: deinit cannot be async, so we synchronously free
+        if let h = handle {{
+            motto_transport_close(h)
+            motto_transport_free(h)
+        }}
+    }}
+}}
+
+enum MottoError: Error {{
+    case connectionFailed(String)
+    case notConnected
+    case sendFailed(String)
+    case receiveFailed(String)
+}}
+"#
+    } else {
+        ""
+    };
+
     let content = format!(
         r#"{}
 
@@ -681,8 +789,10 @@ public actor MottoTransport: MottoTransportProtocol {{
     }}
 }}
 #endif
+{ffi_transport}
 "#,
-        swift_header(manifest)
+        swift_header(manifest),
+        ffi_transport = ffi_transport
     );
 
     Ok(GeneratedFile {

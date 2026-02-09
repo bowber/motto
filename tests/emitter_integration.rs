@@ -48,6 +48,7 @@ fn create_test_config(dir: &TempDir) -> EmitterConfig {
         output_dir: dir.path().to_path_buf(),
         wasm_bindings: false,
         native_bindings: false,
+        transport_mode: Default::default(),
         manifest,
     }
 }

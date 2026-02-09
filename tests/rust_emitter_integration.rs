@@ -38,6 +38,7 @@ fn test_rust_emitter_simple_schema() {
         output_dir: temp_dir.path().to_path_buf(),
         wasm_bindings: false,
         native_bindings: false,
+        transport_mode: Default::default(),
         manifest,
     };
 
@@ -89,6 +90,7 @@ fn test_rust_emitter_generates_router() {
         output_dir: temp_dir.path().to_path_buf(),
         wasm_bindings: false,
         native_bindings: false,
+        transport_mode: Default::default(),
         manifest,
     };
 
@@ -137,6 +139,7 @@ fn test_rust_emitter_excludes_generics_from_router() {
         output_dir: temp_dir.path().to_path_buf(),
         wasm_bindings: false,
         native_bindings: false,
+        transport_mode: Default::default(),
         manifest,
     };
 
@@ -182,6 +185,7 @@ fn test_rust_emitter_enum_generation() {
         output_dir: temp_dir.path().to_path_buf(),
         wasm_bindings: false,
         native_bindings: false,
+        transport_mode: Default::default(),
         manifest,
     };
 
@@ -231,6 +235,7 @@ fn test_rust_emitter_type_aliases() {
         output_dir: temp_dir.path().to_path_buf(),
         wasm_bindings: false,
         native_bindings: false,
+        transport_mode: Default::default(),
         manifest,
     };
 
@@ -287,6 +292,7 @@ fn test_rust_emitter_compiles() {
         output_dir: temp_dir.path().to_path_buf(),
         wasm_bindings: false,
         native_bindings: false,
+        transport_mode: Default::default(),
         manifest,
     };
 
@@ -339,6 +345,7 @@ fn test_rust_emitter_tests_pass() {
         output_dir: temp_dir.path().to_path_buf(),
         wasm_bindings: false,
         native_bindings: false,
+        transport_mode: Default::default(),
         manifest,
     };
 
