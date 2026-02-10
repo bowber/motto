@@ -978,8 +978,8 @@ namespace Motto.SDK
      }}
  {ffi_transport}
  {transport_router}
-  }}}}}}
-  "#,
+}}
+"#,
         header = csharp_header(manifest),
         ffi_transport = ffi_transport,
         transport_router = transport_router
