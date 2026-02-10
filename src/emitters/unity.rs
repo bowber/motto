@@ -720,8 +720,8 @@ fn generate_runtime(
 
     let content = format!(
         r#"{}
+using System;
 using System.Threading.Tasks;
-using UnityEngine;
 
 namespace Motto.SDK
 {{
@@ -750,8 +750,8 @@ namespace Motto.SDK
     {{
         public static int CalculateDelay(int attempt, RetryConfig config)
         {{
-            var delay = config.InitialDelayMs * Mathf.Pow(config.BackoffMultiplier, attempt);
-            return Mathf.Min((int)delay, config.MaxDelayMs);
+            var delay = config.InitialDelayMs * Math.Pow(config.BackoffMultiplier, attempt);
+            return Math.Min((int)delay, config.MaxDelayMs);
         }}
     }}
 

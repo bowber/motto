@@ -1008,22 +1008,22 @@ export class MottoTransport {{
         TransportMode::Runtime => {
             r#"export type TransportKind = 'webtransport' | 'websocket';
 
-export function transportKindForUrl(url: string): TransportKind {{
+export function transportKindForUrl(url: string): TransportKind {
   if (url.startsWith('ws://') || url.startsWith('wss://')) return 'websocket';
   if (url.startsWith('https://')) return 'webtransport';
-  throw new Error(`Unsupported transport URL scheme: ${{url}}`);
-}}
+  throw new Error(`Unsupported transport URL scheme: ${url}`);
+}
 
-interface MottoDatagramTransport {{
+interface MottoDatagramTransport {
   connect(): Promise<void>;
   reconnect(): Promise<void>;
   sendDatagram(data: Uint8Array): Promise<void>;
   receiveDatagram(): AsyncGenerator<Uint8Array>;
   getState(): ConnectionState;
   close(): Promise<void>;
-}}
+}
 
-export class MottoWebTransport implements MottoDatagramTransport {{
+export class MottoWebTransport implements MottoDatagramTransport {
   private transport: any | null = null;
   private state: ConnectionState = ConnectionState.Disconnected;
   private retryAttempt = 0;
@@ -1031,81 +1031,81 @@ export class MottoWebTransport implements MottoDatagramTransport {{
   constructor(
     private readonly url: string,
     private readonly retryConfig: RetryConfig = DEFAULT_RETRY_CONFIG,
-  ) {{}}
+  ) {}
 
-  async connect(): Promise<void> {{
+  async connect(): Promise<void> {
     if (this.state === ConnectionState.Connected) return;
     this.state = ConnectionState.Connecting;
 
-    try {{
+    try {
       const WebTransportCtor = (globalThis as any).WebTransport;
-      if (!WebTransportCtor) {{
+      if (!WebTransportCtor) {
         throw new Error('WebTransport is unavailable in this runtime');
-      }}
+      }
       this.transport = new WebTransportCtor(this.url);
       await this.transport.ready;
       this.state = ConnectionState.Connected;
       this.retryAttempt = 0;
-    }} catch (error) {{
+    } catch (error) {
       this.state = ConnectionState.Error;
       throw error;
-    }}
-  }}
+    }
+  }
 
-  async reconnect(): Promise<void> {{
-    if (this.retryAttempt >= this.retryConfig.maxRetries) {{
+  async reconnect(): Promise<void> {
+    if (this.retryAttempt >= this.retryConfig.maxRetries) {
       throw new Error('Max retry attempts exceeded');
-    }}
+    }
     this.state = ConnectionState.Reconnecting;
     const delayMs = calculateRetryDelay(this.retryAttempt, this.retryConfig);
     this.retryAttempt += 1;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     await this.connect();
-  }}
+  }
 
-  async sendDatagram(data: Uint8Array): Promise<void> {{
-    if (!this.transport || this.state !== ConnectionState.Connected) {{
+  async sendDatagram(data: Uint8Array): Promise<void> {
+    if (!this.transport || this.state !== ConnectionState.Connected) {
       throw new Error('Not connected');
-    }}
+    }
     const writer = this.transport.datagrams.writable.getWriter();
-    try {{
+    try {
       await writer.write(data);
-    }} finally {{
+    } finally {
       writer.releaseLock();
-    }}
-  }}
+    }
+  }
 
-  async *receiveDatagram(): AsyncGenerator<Uint8Array> {{
-    if (!this.transport || this.state !== ConnectionState.Connected) {{
+  async *receiveDatagram(): AsyncGenerator<Uint8Array> {
+    if (!this.transport || this.state !== ConnectionState.Connected) {
       throw new Error('Not connected');
-    }}
+    }
 
     const reader = this.transport.datagrams.readable.getReader();
-    try {{
-      while (true) {{
-        const {{ value, done }} = await reader.read();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
         if (done) break;
         if (value) yield value;
-      }}
-    }} finally {{
+      }
+    } finally {
       reader.releaseLock();
-    }}
-  }}
+    }
+  }
 
-  getState(): ConnectionState {{
+  getState(): ConnectionState {
     return this.state;
-  }}
+  }
 
-  async close(): Promise<void> {{
-    if (this.transport) {{
+  async close(): Promise<void> {
+    if (this.transport) {
       this.transport.close();
       this.transport = null;
-    }}
+    }
     this.state = ConnectionState.Disconnected;
-  }}
-}}
+  }
+}
 
-export class MottoWebSocket implements MottoDatagramTransport {{
+export class MottoWebSocket implements MottoDatagramTransport {
   private socket: any | null = null;
   private state: ConnectionState = ConnectionState.Disconnected;
   private retryAttempt = 0;
@@ -1115,146 +1115,146 @@ export class MottoWebSocket implements MottoDatagramTransport {{
   constructor(
     private readonly url: string,
     private readonly retryConfig: RetryConfig = DEFAULT_RETRY_CONFIG,
-  ) {{}}
+  ) {}
 
-  async connect(): Promise<void> {{
+  async connect(): Promise<void> {
     if (this.state === ConnectionState.Connected) return;
     this.state = ConnectionState.Connecting;
 
     const WebSocketCtor = (globalThis as any).WebSocket;
-    if (!WebSocketCtor) {{
+    if (!WebSocketCtor) {
       this.state = ConnectionState.Error;
       throw new Error('WebSocket is unavailable in this runtime');
-    }}
+    }
 
-    await new Promise<void>((resolve, reject) => {{
+    await new Promise<void>((resolve, reject) => {
       const socket = new WebSocketCtor(this.url);
       socket.binaryType = 'arraybuffer';
 
-      const onOpen = () => {{
+      const onOpen = () => {
         cleanup();
         this.socket = socket;
         this.state = ConnectionState.Connected;
         this.retryAttempt = 0;
         resolve();
-      }};
+      };
 
-      const onError = () => {{
+      const onError = () => {
         cleanup();
         this.state = ConnectionState.Error;
         reject(new Error('WebSocket connection failed'));
-      }};
+      };
 
-      const onClose = () => {{
+      const onClose = () => {
         this.state = ConnectionState.Disconnected;
         this.socket = null;
-        while (this.recvResolvers.length > 0) {{
+        while (this.recvResolvers.length > 0) {
           const resolveNext = this.recvResolvers.shift();
           if (resolveNext) resolveNext(null);
-        }}
-      }};
+        }
+      };
 
-      const onMessage = (event: any) => {{
+      const onMessage = (event: any) => {
         const data = event.data;
         if (typeof data === 'string') return;
         const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
         const waiter = this.recvResolvers.shift();
         if (waiter) waiter(bytes);
         else this.recvQueue.push(bytes);
-      }};
+      };
 
-      const cleanup = () => {{
+      const cleanup = () => {
         socket.removeEventListener('open', onOpen);
         socket.removeEventListener('error', onError);
-      }};
+      };
 
-      socket.addEventListener('open', onOpen, {{ once: true }});
-      socket.addEventListener('error', onError, {{ once: true }});
+      socket.addEventListener('open', onOpen, { once: true });
+      socket.addEventListener('error', onError, { once: true });
       socket.addEventListener('close', onClose);
       socket.addEventListener('message', onMessage);
-    }});
-  }}
+    });
+  }
 
-  async reconnect(): Promise<void> {{
-    if (this.retryAttempt >= this.retryConfig.maxRetries) {{
+  async reconnect(): Promise<void> {
+    if (this.retryAttempt >= this.retryConfig.maxRetries) {
       throw new Error('Max retry attempts exceeded');
-    }}
+    }
     this.state = ConnectionState.Reconnecting;
     const delayMs = calculateRetryDelay(this.retryAttempt, this.retryConfig);
     this.retryAttempt += 1;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     await this.connect();
-  }}
+  }
 
-  async sendDatagram(data: Uint8Array): Promise<void> {{
-    if (!this.socket || this.state !== ConnectionState.Connected) {{
+  async sendDatagram(data: Uint8Array): Promise<void> {
+    if (!this.socket || this.state !== ConnectionState.Connected) {
       throw new Error('Not connected');
-    }}
+    }
     this.socket.send(data);
-  }}
+  }
 
-  async *receiveDatagram(): AsyncGenerator<Uint8Array> {{
-    while (this.state === ConnectionState.Connected || this.recvQueue.length > 0) {{
-      if (this.recvQueue.length > 0) {{
+  async *receiveDatagram(): AsyncGenerator<Uint8Array> {
+    while (this.state === ConnectionState.Connected || this.recvQueue.length > 0) {
+      if (this.recvQueue.length > 0) {
         yield this.recvQueue.shift()!;
         continue;
-      }}
+      }
 
-      const data = await new Promise<Uint8Array | null>((resolve) => {{
+      const data = await new Promise<Uint8Array | null>((resolve) => {
         this.recvResolvers.push(resolve);
-      }});
+      });
 
       if (!data) break;
       yield data;
-    }}
-  }}
+    }
+  }
 
-  getState(): ConnectionState {{
+  getState(): ConnectionState {
     return this.state;
-  }}
+  }
 
-  async close(): Promise<void> {{
-    if (this.socket) {{
+  async close(): Promise<void> {
+    if (this.socket) {
       this.socket.close();
       this.socket = null;
-    }}
+    }
     this.state = ConnectionState.Disconnected;
-  }}
-}}
+  }
+}
 
-export class MottoTransport implements MottoDatagramTransport {{
+export class MottoTransport implements MottoDatagramTransport {
   private readonly inner: MottoDatagramTransport;
 
-  constructor(url: string, retryConfig: RetryConfig = DEFAULT_RETRY_CONFIG) {{
+  constructor(url: string, retryConfig: RetryConfig = DEFAULT_RETRY_CONFIG) {
     const kind = transportKindForUrl(url);
     this.inner = kind === 'webtransport'
       ? new MottoWebTransport(url, retryConfig)
       : new MottoWebSocket(url, retryConfig);
-  }}
+  }
 
-  connect(): Promise<void> {{
+  connect(): Promise<void> {
     return this.inner.connect();
-  }}
+  }
 
-  reconnect(): Promise<void> {{
+  reconnect(): Promise<void> {
     return this.inner.reconnect();
-  }}
+  }
 
-  sendDatagram(data: Uint8Array): Promise<void> {{
+  sendDatagram(data: Uint8Array): Promise<void> {
     return this.inner.sendDatagram(data);
-  }}
+  }
 
-  receiveDatagram(): AsyncGenerator<Uint8Array> {{
+  receiveDatagram(): AsyncGenerator<Uint8Array> {
     return this.inner.receiveDatagram();
-  }}
+  }
 
-  getState(): ConnectionState {{
+  getState(): ConnectionState {
     return this.inner.getState();
-  }}
+  }
 
-  close(): Promise<void> {{
+  close(): Promise<void> {
     return this.inner.close();
-  }}
+  }
 }"#
         }
     };
