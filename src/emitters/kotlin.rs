@@ -590,6 +590,30 @@ class MottoFfiTransport(
         ""
     };
 
+    let transport_router = if transport_mode == TransportMode::Ffi {
+        r#"
+
+/** Create a transport implementation based on URL scheme */
+fun createTransport(url: String, retryConfig: RetryConfig = RetryConfig()): MottoTransport {
+    return when (transportKindForUrl(url)) {
+        TransportKind.WEBSOCKET -> MottoWebSocketTransport(url, retryConfig)
+        TransportKind.WEBTRANSPORT -> MottoFfiTransport(url, retryConfig)
+    }
+}
+"#
+    } else {
+        r#"
+
+/** Create a transport implementation based on URL scheme */
+fun createTransport(url: String, retryConfig: RetryConfig = RetryConfig()): MottoTransport {
+    return when (transportKindForUrl(url)) {
+        TransportKind.WEBSOCKET -> MottoWebSocketTransport(url, retryConfig)
+        TransportKind.WEBTRANSPORT -> throw IOException("WebTransport (https://) requires FFI transport mode")
+    }
+}
+"#
+    };
+
     let content = format!(
         r#"{}
 
@@ -625,17 +649,32 @@ fun calculateRetryDelay(attempt: Int, config: RetryConfig = RetryConfig()): Long
     return min(delay.toLong(), config.maxDelayMs)
 }}
 
-/** Transport interface */
-interface MottoTransport {{
+ /** Transport interface */
+ interface MottoTransport {{
     val state: StateFlow<ConnectionState>
     suspend fun connect()
     suspend fun disconnect()
     suspend fun send(data: ByteArray)
     fun receive(): Flow<ByteArray>
+ }}
+
+/** Transport kinds supported by the SDK */
+enum class TransportKind {{
+    WEBSOCKET,
+    WEBTRANSPORT,
+}}
+
+/** Determine transport kind from URL scheme */
+fun transportKindForUrl(url: String): TransportKind {{
+    return when {{
+        url.startsWith("ws://") || url.startsWith("wss://") -> TransportKind.WEBSOCKET
+        url.startsWith("https://") -> TransportKind.WEBTRANSPORT
+        else -> throw IOException("Unsupported transport URL scheme")
+    }}
 }}
 
 /** WebSocket-based transport implementation */
-class MottoWebSocketTransport(
+ class MottoWebSocketTransport(
     private val url: String,
     private val retryConfig: RetryConfig = RetryConfig()
 ) : MottoTransport {{
@@ -749,13 +788,15 @@ class MottoWebSocketTransport(
         }}
     }}
 
-    override fun receive(): Flow<ByteArray> = incoming.receiveAsFlow()
-}}
-{}
-"#,
+ override fun receive(): Flow<ByteArray> = incoming.receiveAsFlow()
+ }}
+ {}
+ {}
+ "#,
         kotlin_header(manifest),
         manifest.meta.version_byte,
-        ffi_transport
+        ffi_transport,
+        transport_router
     );
 
     Ok(GeneratedFile {
@@ -842,6 +883,19 @@ class MottoSdkTests {{
     @Test
     fun transportStartsDisconnected() {{
         val transport = MottoWebSocketTransport("ws://localhost:19001")
+        assertEquals(ConnectionState.DISCONNECTED, transport.state.value)
+    }}
+
+    @Test
+    fun transportKindSelection() {{
+        assertEquals(TransportKind.WEBSOCKET, transportKindForUrl("ws://localhost:19001"))
+        assertEquals(TransportKind.WEBSOCKET, transportKindForUrl("wss://example.com/ws"))
+        assertEquals(TransportKind.WEBTRANSPORT, transportKindForUrl("https://example.com"))
+    }}
+
+    @Test
+    fun createTransportForWebSocketStartsDisconnected() {{
+        val transport = createTransport("ws://localhost:19001")
         assertEquals(ConnectionState.DISCONNECTED, transport.state.value)
     }}
 

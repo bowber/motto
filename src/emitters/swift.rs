@@ -85,7 +85,7 @@ impl Emitter for SwiftEmitter {
             generate_types(&config.manifest)?,
             generate_codec(&config.manifest)?,
             generate_runtime(&config.manifest, config.transport_mode)?,
-            generate_package_swift(&config.manifest)?,
+            generate_package_swift(&config.manifest, config.transport_mode)?,
             generate_tests(&config.manifest)?,
         ];
 
@@ -701,8 +701,8 @@ public protocol MottoTransportProtocol: AnyObject, Sendable {{
 import FoundationNetworking
 #endif
 
-/// WebSocket transport for Swift runtime mode.
-public actor MottoTransport: MottoTransportProtocol {{
+/// Native WebSocket transport for Swift runtime mode.
+public actor MottoWebSocketTransport: MottoTransportProtocol {{
     private let url: URL
     private let retryConfig: RetryConfig
     private var session: URLSession?
@@ -723,8 +723,8 @@ public actor MottoTransport: MottoTransportProtocol {{
             let err = NSError(
                 domain: "MottoTransport",
                 code: -100,
-                userInfo: [NSLocalizedDescriptionKey: "MottoTransport requires ws:// or wss:// URL"]
-            )
+                 userInfo: [NSLocalizedDescriptionKey: "MottoWebSocketTransport requires ws:// or wss:// URL"]
+             )
             state = .error(err)
             throw err
         }}
@@ -801,8 +801,50 @@ public actor MottoTransport: MottoTransportProtocol {{
         }}
     }}
 }}
-{ffi_transport}
-"#,
+
+/// Transport router.
+///
+/// - `ws://` / `wss://` uses native `URLSessionWebSocketTask`
+/// - `https://` uses FFI-backed transport when present (transport mode: ffi)
+public actor MottoTransport: MottoTransportProtocol {{
+    private let inner: any MottoTransportProtocol
+
+    public var state: ConnectionState {{
+        get async {{ await inner.state }}
+    }}
+
+    public init(url: URL, retryConfig: RetryConfig = .default) {{
+        let scheme = (url.scheme ?? "").lowercased()
+        if scheme == "ws" || scheme == "wss" {{
+            self.inner = MottoWebSocketTransport(url: url, retryConfig: retryConfig)
+        }} else {{
+            #if MOTTO_FFI
+            self.inner = MottoFfiTransport(url: url, retryConfig: retryConfig)
+            #else
+            self.inner = MottoWebSocketTransport(url: url, retryConfig: retryConfig)
+            #endif
+        }}
+    }}
+
+    public func connect() async throws {{
+        try await inner.connect()
+    }}
+
+    public func disconnect() async {{
+        await inner.disconnect()
+    }}
+
+    public func send(_ data: Data) async throws {{
+        try await inner.send(data)
+    }}
+
+    public func receive() async throws -> Data {{
+        try await inner.receive()
+    }}
+}}
+
+ {ffi_transport}
+ "#,
         swift_header(manifest),
         ffi_transport = ffi_transport
     );
@@ -813,7 +855,15 @@ public actor MottoTransport: MottoTransportProtocol {{
     })
 }
 
-fn generate_package_swift(manifest: &SchemaManifest) -> Result<GeneratedFile> {
+fn generate_package_swift(
+    manifest: &SchemaManifest,
+    transport_mode: TransportMode,
+) -> Result<GeneratedFile> {
+    let ffi_define = if transport_mode == TransportMode::Ffi {
+        "                .define(\"MOTTO_FFI\"),\n"
+    } else {
+        ""
+    };
     let content = format!(
         r#"// swift-tools-version:5.9
 // MOTTO GENERATED - Protocol Version: 0x{:02X}
@@ -839,10 +889,10 @@ let package = Package(
         .target(
             name: "MottoSDK",
             dependencies: [],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
-        ),
+             swiftSettings: [
+                 .enableExperimentalFeature("StrictConcurrency"),
+ {ffi_define}            ]
+         ),
         .testTarget(
             name: "MottoSDKTests",
             dependencies: ["MottoSDK"]
@@ -850,7 +900,8 @@ let package = Package(
     ]
 )
 "#,
-        manifest.meta.version_byte
+        manifest.meta.version_byte,
+        ffi_define = ffi_define
     );
 
     Ok(GeneratedFile {

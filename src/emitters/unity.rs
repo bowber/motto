@@ -718,8 +718,52 @@ fn generate_runtime(
         ""
     };
 
+    let transport_router = if transport_mode == TransportMode::Ffi {
+        r#"
+
+    /// <summary>Create a transport implementation based on URL scheme</summary>
+    public static class MottoTransportFactory
+    {
+        public static IMottoTransport Create(string url, RetryConfig retryConfig = null)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                throw new InvalidOperationException("Invalid URL");
+
+            if (uri.Scheme == "ws" || uri.Scheme == "wss")
+                return new MottoWebSocketTransport(url, retryConfig);
+
+            if (uri.Scheme == "https")
+                return new MottoFfiTransport(url, retryConfig);
+
+            throw new InvalidOperationException("Unsupported transport URL scheme");
+        }
+    }
+"#
+    } else {
+        r#"
+
+    /// <summary>Create a transport implementation based on URL scheme</summary>
+    public static class MottoTransportFactory
+    {
+        public static IMottoTransport Create(string url, RetryConfig retryConfig = null)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                throw new InvalidOperationException("Invalid URL");
+
+            if (uri.Scheme == "ws" || uri.Scheme == "wss")
+                return new MottoWebSocketTransport(url, retryConfig);
+
+            if (uri.Scheme == "https")
+                throw new InvalidOperationException("WebTransport (https://) requires FFI transport mode");
+
+            throw new InvalidOperationException("Unsupported transport URL scheme");
+        }
+    }
+"#
+    };
+
     let content = format!(
-        r#"{}
+        r#"{header}
 using System;
 using System.IO;
 using System.Net.WebSockets;
@@ -931,11 +975,14 @@ namespace Motto.SDK
                 State = ConnectionState.Error;
             }}
         }}
-    }}
-{}}}
-"#,
-        csharp_header(manifest),
-        ffi_transport
+     }}
+ {ffi_transport}
+ {transport_router}
+  }}}}}}
+  "#,
+        header = csharp_header(manifest),
+        ffi_transport = ffi_transport,
+        transport_router = transport_router
     );
 
     Ok(GeneratedFile {
@@ -1171,6 +1218,27 @@ namespace Motto.SDK.Tests
         {{
             var transport = new MottoWebSocketTransport("https://example.com");
             Assert.ThrowsAsync<System.InvalidOperationException>(async () => await transport.ConnectAsync());
+        }}
+
+        [Test]
+        public void TransportFactoryCreatesWebSocket()
+        {{
+            var transport = MottoTransportFactory.Create("ws://localhost:19001");
+            Assert.AreEqual(ConnectionState.Disconnected, transport.State);
+        }}
+
+        [Test]
+        public void TransportFactoryAllowsOrRejectsWebTransport()
+        {{
+            try
+            {{
+                var transport = MottoTransportFactory.Create("https://example.com");
+                Assert.NotNull(transport);
+            }}
+            catch (System.InvalidOperationException)
+            {{
+                Assert.Pass();
+            }}
         }}
     }}
 }}
