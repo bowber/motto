@@ -690,7 +690,7 @@ public func calculateRetryDelay(attempt: Int, config: RetryConfig = .default) ->
 
 /// Motto transport protocol
 public protocol MottoTransportProtocol: AnyObject, Sendable {{
-    var state: ConnectionState {{ get }}
+    var state: ConnectionState {{ get async }}
     func connect() async throws
     func disconnect() async
     func send(_ data: Data) async throws
@@ -766,7 +766,7 @@ public actor MottoTransport: MottoTransportProtocol {{
             throw NSError(domain: "MottoTransport", code: -1, userInfo: [NSLocalizedDescriptionKey: "Not connected"])
         }}
 
-        try await withCheckedThrowingContinuation {{ continuation in
+        try await withCheckedThrowingContinuation {{ (continuation: CheckedContinuation<Void, Error>) in
             task.send(.data(data)) {{ error in
                 if let error = error {{
                     continuation.resume(throwing: error)
