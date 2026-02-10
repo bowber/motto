@@ -697,98 +697,110 @@ public protocol MottoTransportProtocol: AnyObject, Sendable {{
     func receive() async throws -> Data
 }}
 
-#if canImport(Network)
-import Network
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
-/// WebTransport-like connection using Network.framework
-@available(iOS 15.0, macOS 12.0, *)
+/// WebSocket transport for Swift runtime mode.
 public actor MottoTransport: MottoTransportProtocol {{
     private let url: URL
     private let retryConfig: RetryConfig
-    private var connection: NWConnection?
+    private var session: URLSession?
+    private var webSocketTask: URLSessionWebSocketTask?
     private var retryAttempt: Int = 0
-    
+
     public private(set) var state: ConnectionState = .disconnected
-    
+
     public init(url: URL, retryConfig: RetryConfig = .default) {{
         self.url = url
         self.retryConfig = retryConfig
     }}
-    
+
     public func connect() async throws {{
-        state = .connecting
-        
-        // Note: This is a simplified TCP connection
-        // Real WebTransport requires HTTP/3 + QUIC support
-        let endpoint = NWEndpoint.url(url)!
-        let parameters = NWParameters.tcp
-        
-        connection = NWConnection(to: endpoint, using: parameters)
-        
-        return try await withCheckedThrowingContinuation {{ continuation in
-            connection?.stateUpdateHandler = {{ [weak self] newState in
-                Task {{
-                    switch newState {{
-                    case .ready:
-                        await self?.setState(.connected)
-                        continuation.resume()
-                    case .failed(let error):
-                        await self?.setState(.error(error))
-                        continuation.resume(throwing: error)
-                    default:
-                        break
-                    }}
-                }}
-            }}
-            connection?.start(queue: .global())
+        if case .connected = state {{ return }}
+
+        guard let scheme = url.scheme?.lowercased(), scheme == "ws" || scheme == "wss" else {{
+            let err = NSError(
+                domain: "MottoTransport",
+                code: -100,
+                userInfo: [NSLocalizedDescriptionKey: "MottoTransport requires ws:// or wss:// URL"]
+            )
+            state = .error(err)
+            throw err
         }}
+
+        state = .connecting
+
+        let session = URLSession(configuration: .default)
+        let task = session.webSocketTask(with: url)
+        self.session = session
+        self.webSocketTask = task
+        task.resume()
+
+        state = .connected
+        retryAttempt = 0
     }}
-    
-    private func setState(_ newState: ConnectionState) {{
-        state = newState
+
+    public func reconnect() async throws {{
+        guard retryAttempt < retryConfig.maxRetries else {{
+            throw NSError(domain: "MottoTransport", code: -101, userInfo: [NSLocalizedDescriptionKey: "Max retry attempts exceeded"])
+        }}
+
+        state = .reconnecting
+        let delayMs = calculateRetryDelay(attempt: retryAttempt, config: retryConfig)
+        retryAttempt += 1
+        try await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+        try await connect()
     }}
-    
+
     public func disconnect() async {{
-        connection?.cancel()
-        connection = nil
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
+        session?.invalidateAndCancel()
+        session = nil
         state = .disconnected
     }}
-    
+
     public func send(_ data: Data) async throws {{
-        guard let connection = connection else {{
+        guard let task = webSocketTask else {{
             throw NSError(domain: "MottoTransport", code: -1, userInfo: [NSLocalizedDescriptionKey: "Not connected"])
         }}
-        
-        return try await withCheckedThrowingContinuation {{ continuation in
-            connection.send(content: data, completion: .contentProcessed {{ error in
+
+        try await withCheckedThrowingContinuation {{ continuation in
+            task.send(.data(data)) {{ error in
                 if let error = error {{
                     continuation.resume(throwing: error)
                 }} else {{
                     continuation.resume()
                 }}
-            }})
+            }}
         }}
     }}
-    
+
     public func receive() async throws -> Data {{
-        guard let connection = connection else {{
+        guard let task = webSocketTask else {{
             throw NSError(domain: "MottoTransport", code: -1, userInfo: [NSLocalizedDescriptionKey: "Not connected"])
         }}
-        
+
         return try await withCheckedThrowingContinuation {{ continuation in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 65535) {{ data, _, _, error in
-                if let error = error {{
+            task.receive {{ result in
+                switch result {{
+                case .success(let message):
+                    switch message {{
+                    case .data(let data):
+                        continuation.resume(returning: data)
+                    case .string(let string):
+                        continuation.resume(returning: Data(string.utf8))
+                    @unknown default:
+                        continuation.resume(throwing: NSError(domain: "MottoTransport", code: -3, userInfo: [NSLocalizedDescriptionKey: "Unknown WebSocket message type"]))
+                    }}
+                case .failure(let error):
                     continuation.resume(throwing: error)
-                }} else if let data = data {{
-                    continuation.resume(returning: data)
-                }} else {{
-                    continuation.resume(throwing: NSError(domain: "MottoTransport", code: -2, userInfo: [NSLocalizedDescriptionKey: "No data received"]))
                 }}
             }}
         }}
     }}
 }}
-#endif
 {ffi_transport}
 "#,
         swift_header(manifest),
@@ -861,6 +873,26 @@ final class MottoSDKTests: XCTestCase {{
         var builder = PacketBuilder()
         let bytes = builder.build()
         XCTAssertEqual(bytes.first, PROTOCOL_VERSION_BYTE)
+    }}
+
+    func testTransportStartsDisconnected() async throws {{
+        let transport = MottoTransport(url: URL(string: "ws://localhost:19001")!)
+        let state = await transport.state
+        if case .disconnected = state {{
+            XCTAssertTrue(true)
+        }} else {{
+            XCTFail("Expected disconnected initial state")
+        }}
+    }}
+
+    func testTransportRejectsUnsupportedScheme() async throws {{
+        let transport = MottoTransport(url: URL(string: "https://example.com")!)
+        do {{
+            try await transport.connect()
+            XCTFail("Expected connect() to fail for https:// URL")
+        }} catch {{
+            XCTAssertTrue(true)
+        }}
     }}
 }}
 "#,
