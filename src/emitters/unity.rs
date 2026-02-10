@@ -721,6 +721,9 @@ fn generate_runtime(
     let content = format!(
         r#"{}
 using System;
+using System.IO;
+using System.Net.WebSockets;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Motto.SDK
@@ -771,6 +774,9 @@ namespace Motto.SDK
         private readonly string _url;
         private readonly RetryConfig _retryConfig;
         private int _retryAttempt;
+        private ClientWebSocket _socket;
+        private CancellationTokenSource _receiveCts;
+        private Task _receiveTask;
 
         public ConnectionState State {{ get; private set; }} = ConnectionState.Disconnected;
         public event System.Action<byte[]> OnReceived;
@@ -783,15 +789,30 @@ namespace Motto.SDK
 
         public async Task ConnectAsync()
         {{
+            if (State == ConnectionState.Connected)
+                return;
+
             State = ConnectionState.Connecting;
 
             try
             {{
-                // TODO: Implement actual WebSocket connection
-                // For Unity, consider using NativeWebSocket or UnityWebSocket
-                await Task.Delay(100); // Placeholder
+                if (!Uri.TryCreate(_url, UriKind.Absolute, out var uri) ||
+                    (uri.Scheme != "ws" && uri.Scheme != "wss"))
+                {{
+                    throw new InvalidOperationException("MottoWebSocketTransport requires ws:// or wss:// URL");
+                }}
+
+                _socket?.Dispose();
+                _receiveCts?.Cancel();
+
+                _socket = new ClientWebSocket();
+                await _socket.ConnectAsync(uri, CancellationToken.None);
+
                 State = ConnectionState.Connected;
                 _retryAttempt = 0;
+
+                _receiveCts = new CancellationTokenSource();
+                _receiveTask = Task.Run(() => ReceiveLoopAsync(_socket, _receiveCts.Token));
             }}
             catch (System.Exception)
             {{
@@ -817,20 +838,98 @@ namespace Motto.SDK
 
         public async Task DisconnectAsync()
         {{
-            // TODO: Close WebSocket
-            await Task.CompletedTask;
+            _receiveCts?.Cancel();
+
+            if (_socket != null)
+            {{
+                try
+                {{
+                    if (_socket.State == WebSocketState.Open || _socket.State == WebSocketState.CloseReceived)
+                    {{
+                        await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "disconnect", CancellationToken.None);
+                    }}
+                }}
+                catch
+                {{
+                    // Ignore close errors on shutdown.
+                }}
+
+                _socket.Dispose();
+                _socket = null;
+            }}
+
+            if (_receiveTask != null)
+            {{
+                try
+                {{
+                    await _receiveTask;
+                }}
+                catch
+                {{
+                    // Ignore task cancellation/errors during shutdown.
+                }}
+                _receiveTask = null;
+            }}
+
+            _receiveCts?.Dispose();
+            _receiveCts = null;
             State = ConnectionState.Disconnected;
         }}
 
         public async Task SendAsync(byte[] data)
         {{
-            if (State != ConnectionState.Connected)
+            if (State != ConnectionState.Connected || _socket == null || _socket.State != WebSocketState.Open)
             {{
                 throw new System.InvalidOperationException("Not connected");
             }}
 
-            // TODO: Send via WebSocket
-            await Task.CompletedTask;
+            await _socket.SendAsync(
+                new ArraySegment<byte>(data),
+                WebSocketMessageType.Binary,
+                true,
+                CancellationToken.None
+            );
+        }}
+
+        private async Task ReceiveLoopAsync(ClientWebSocket socket, CancellationToken cancellationToken)
+        {{
+            var buffer = new byte[65535];
+
+            try
+            {{
+                while (!cancellationToken.IsCancellationRequested && socket.State == WebSocketState.Open)
+                {{
+                    using var ms = new MemoryStream();
+                    WebSocketReceiveResult result;
+
+                    do
+                    {{
+                        result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+
+                        if (result.MessageType == WebSocketMessageType.Close)
+                        {{
+                            State = ConnectionState.Disconnected;
+                            return;
+                        }}
+
+                        ms.Write(buffer, 0, result.Count);
+                    }}
+                    while (!result.EndOfMessage);
+
+                    if (result.MessageType == WebSocketMessageType.Binary)
+                    {{
+                        OnReceived?.Invoke(ms.ToArray());
+                    }}
+                }}
+            }}
+            catch (OperationCanceledException)
+            {{
+                // Normal shutdown path.
+            }}
+            catch
+            {{
+                State = ConnectionState.Error;
+            }}
         }}
     }}
 {}}}
@@ -1058,6 +1157,20 @@ namespace Motto.SDK.Tests
 
             Assert.Greater(data.Length, 0);
             Assert.AreEqual(Protocol.VersionByte, data[0]);
+        }}
+
+        [Test]
+        public void TransportStartsDisconnected()
+        {{
+            var transport = new MottoWebSocketTransport("ws://localhost:19001");
+            Assert.AreEqual(ConnectionState.Disconnected, transport.State);
+        }}
+
+        [Test]
+        public void TransportRejectsUnsupportedScheme()
+        {{
+            var transport = new MottoWebSocketTransport("https://example.com");
+            Assert.ThrowsAsync<System.InvalidOperationException>(async () => await transport.ConnectAsync());
         }}
     }}
 }}
